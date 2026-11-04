@@ -253,6 +253,8 @@ const TEACH_POINTS = [
   { name: "left knee", idx: [25] }, { name: "right knee", idx: [26] }, { name: "left ankle", idx: [27] }, { name: "right ankle", idx: [28] },
 ];
 const TEACH_READY_MS = 3000, TEACH_MS = 10000;
+const validCustom = c => c && typeof c.name === "string" && /^custom-[a-z0-9]+$/.test(c.id) && Array.isArray(c.idx) && c.idx.length >= 1 && c.idx.length <= 2
+  && c.idx.every(i => Number.isInteger(i) && i >= 0 && i <= 32) && (c.axis === "x" || c.axis === "y") && (c.sign === 1 || c.sign === -1) && Number.isFinite(c.floorFrac);
 function registerCustom(c) {
   MOVES[c.id] = {
     name: c.name, target: 20, floorFrac: c.floorFrac, anchor: "bottom", custom: true, part: c.part,
@@ -295,14 +297,16 @@ function load() {
   try {
     let s = JSON.parse(localStorage.getItem(STORE_KEY));
     if (!s) s = JSON.parse(localStorage.getItem("repcounter.v3")); // pushups/situps workout from before the plan existed
-    (s?.custom || []).forEach(registerCustom); // before blankState, so the plan and counts include taught movements
+    // Taught movements are saved data: keep only well-formed ones, so a bad save can't break startup.
+    const custom = (Array.isArray(s?.custom) ? s.custom : []).filter(validCustom).map(c => ({ ...c, name: c.name.slice(0, 40) }));
+    custom.forEach(registerCustom); // before blankState, so the plan and counts include taught movements
     const b = blankState();
     if (s && Array.isArray(s.people)) {
       const m = { ...b, ...s, prefs: { ...b.prefs, ...s.prefs }, sensitivity: { ...b.sensitivity, ...s.sensitivity } };
       m.plan = b.plan.map(x => ({ ...x, ...(s.plan || []).find(y => y.id === x.id) }));
       m.people = b.people.map((p, i) => { const q = s.people[i] || {}; return { ...p, ...q, counts: { ...p.counts, ...q.counts } }; });
       m.peopleCount = Math.min(MAX_PEOPLE, Math.max(1, Number(m.peopleCount) || 3));
-      m.custom = s.custom || [];
+      m.custom = custom;
       return m;
     }
     return b;
@@ -311,6 +315,7 @@ function load() {
 }
 // The ticked movements become this workout's exercises; everyone's current movement must be one of them.
 function buildPlan() {
+  state.plan = state.plan.filter(x => MOVES[x.id]);
   if (!state.plan.some(x => x.on)) state.plan[0].on = true;
   EXERCISES = state.plan.filter(x => x.on).map(x => ({ id: x.id, ...MOVES[x.id], target: x.target }));
   for (const p of state.people) {
@@ -346,16 +351,19 @@ const laneName = (i, n) => LANE_NAMES[n - 1][i];
 const activePeople = () => state.people.slice(0, state.peopleCount);
 
 function setAllActive(id) {
+  endDiagOnChange("movement");
   state.active = id;
   state.people.forEach(p => p.active = id);
   tracks.forEach(t => t.advanceAt = null); // a manual switch cancels any pending automatic one
   resetTracking(); save(); renderExSeg(); updatePeople();
 }
 
+let replayAutoNext = null; // the recording's setting while replaying
+const autoNextOn = () => replayAutoNext ?? $("autoNext").checked;
 // Schedule a move to this person's next unfinished exercise.
 function armAdvance(i, now) {
   const p = state.people[i];
-  if ($("autoNext").checked && EXERCISES.some(e => e.id !== p.active && p.counts[e.id] < e.target)) tracks[i].advanceAt = now + ADVANCE_MS;
+  if (autoNextOn() && EXERCISES.some(e => e.id !== p.active && p.counts[e.id] < e.target)) tracks[i].advanceAt = now + ADVANCE_MS;
 }
 // Anyone already at their target with no switch pending (after a reload, a People change, or turning the option on).
 function rearmFinished() {
@@ -368,7 +376,7 @@ function checkAdvance(i, now) {
   const t = tracks[i], p = state.people[i];
   if (t.advanceAt == null || now < t.advanceAt) return;
   t.advanceAt = null;
-  if (!$("autoNext").checked) return;
+  if (!autoNextOn()) return;
   const cur = exById(p.active);
   if (p.counts[cur.id] < cur.target) return; // a rep was undone or −1 pressed in the meantime
   const nx = EXERCISES.find(e => p.counts[e.id] < e.target);
@@ -385,6 +393,8 @@ function renderPeopleSeg() {
     b.setAttribute("aria-pressed", String(state.peopleCount === n));
     b.onclick = () => {
       if (state.peopleCount === n) return;
+      endDiagOnChange("number of people");
+      if (teach) { teach = null; setTeachStatus("Teaching cancelled: the number of people changed."); }
       state.peopleCount = n;
       tracks = Array.from({ length: MAX_PEOPLE }, newTrack);
       save(); renderPeopleSeg(); renderExSeg(); renderPeople(); renderSets(); rearmFinished();
@@ -408,6 +418,7 @@ function renderMoves() {
     tgt.append(num, document.createTextNode("goal reps"));
     cb.onchange = () => {
       if (!cb.checked && state.plan.filter(y => y.on).length === 1) { cb.checked = true; return; } // keep at least one
+      endDiagOnChange("workout");
       x.on = cb.checked; num.disabled = !x.on; planChanged();
     };
     num.onkeydown = e => { if (e.key === "Enter") num.blur(); };
@@ -445,6 +456,18 @@ function renderExSeg() {
   }
 }
 
+// Small element builder: text goes in as text, attributes via setAttribute (no HTML parsing of user input).
+function el(tag, props = {}, children = []) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(props)) {
+    if (k === "text") e.textContent = v;
+    else if (k === "className" || k === "id") e[k] = v;
+    else e.setAttribute(k, v);
+  }
+  e.append(...children);
+  return e;
+}
+
 function renderTeachWho() {
   const sel = $("teachWho"), keep = sel.value;
   sel.innerHTML = "";
@@ -464,25 +487,27 @@ function renderPeople() {
     const p = state.people[i];
     const card = document.createElement("div");
     card.className = "person"; card.style.setProperty("--pc", `var(${PERSON_COLORS[i]})`);
-    card.innerHTML = `
-      <div class="phead">
-        <input class="pname" id="name-${i}" aria-label="Name for person ${i + 1}">
-        <span class="lane">${laneName(i, state.peopleCount)}</span>
-        <span class="pill" id="phase-${i}" data-phase="nobody">Not in frame</span>
-      </div>
-      ${EXERCISES.map(ex => `
-      <div class="exrow" id="row-${i}-${ex.id}">
-        <span class="n">${ex.name}</span>
-        <span class="ctl">
-          <button class="btn" id="minus-${i}-${ex.id}" aria-label="One less ${ex.name.toLowerCase()} for person ${i + 1}">−</button>
-          <input type="number" min="0" max="9999" id="cnt-${i}-${ex.id}" aria-label="${ex.name} done by person ${i + 1}">
-          <button class="btn" id="plus-${i}-${ex.id}" aria-label="One more ${ex.name.toLowerCase()} for person ${i + 1}">+</button>
-        </span>
-        <span class="goal">of <input type="number" min="1" max="9999" id="goal-${i}-${ex.id}" aria-label="${ex.name} goal"></span>
-        <span class="bar"><i id="bar-${i}-${ex.id}"></i></span>
-      </div>`).join("")}`;
+    // Built from elements, not an HTML string: movement names can be anything a user typed.
+    const nameIn = el("input", { className: "pname", id: `name-${i}`, "aria-label": `Name for person ${i + 1}` });
+    card.append(el("div", { className: "phead" }, [
+      nameIn,
+      el("span", { className: "lane", text: laneName(i, state.peopleCount) }),
+      el("span", { className: "pill", id: `phase-${i}`, "data-phase": "nobody", text: "Not in frame" }),
+    ]));
+    for (const ex of EXERCISES) {
+      const lower = ex.name.toLowerCase();
+      card.append(el("div", { className: "exrow", id: `row-${i}-${ex.id}` }, [
+        el("span", { className: "n", text: ex.name }),
+        el("span", { className: "ctl" }, [
+          el("button", { className: "btn", id: `minus-${i}-${ex.id}`, "aria-label": `One less ${lower} for person ${i + 1}`, text: "−" }),
+          el("input", { type: "number", min: "0", max: "9999", inputmode: "numeric", id: `cnt-${i}-${ex.id}`, "aria-label": `${ex.name} done by person ${i + 1}` }),
+          el("button", { className: "btn", id: `plus-${i}-${ex.id}`, "aria-label": `One more ${lower} for person ${i + 1}`, text: "+" }),
+        ]),
+        el("span", { className: "goal" }, ["of ", el("input", { type: "number", min: "1", max: "9999", inputmode: "numeric", id: `goal-${i}-${ex.id}`, "aria-label": `${ex.name} goal` })]),
+        el("span", { className: "bar" }, [el("i", { id: `bar-${i}-${ex.id}` })]),
+      ]));
+    }
     box.appendChild(card);
-    const nameIn = card.querySelector(`#name-${i}`);
     nameIn.value = p.name;
     nameIn.onchange = () => { p.name = nameIn.value.trim() || `Person ${i + 1}`; nameIn.value = p.name; save(); renderSets(); };
     for (const ex of EXERCISES) {
@@ -544,7 +569,7 @@ function renderSets() {
     const li = document.createElement("li");
     const t = new Date(s.start).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
     const who = document.createElement("span");
-    who.textContent = `${state.people[s.p].name} · ${exById(s.ex).name} set ${nth[key]} · ${t}`;
+    who.textContent = `${state.people[s.p].name} · ${MOVES[s.ex]?.name ?? "Removed movement"} set ${nth[key]} · ${t}`;
     const b = document.createElement("b"); b.textContent = s.reps;
     li.append(who, b);
     ul.prepend(li);
@@ -561,7 +586,7 @@ function renderTune() {
     const inp = document.createElement("input");
     inp.className = "r"; inp.type = "range"; inp.min = 1; inp.max = 5; inp.step = 1;
     inp.id = `sens-${ex.id}`; inp.value = state.sensitivity[ex.id] ?? 3;
-    inp.oninput = () => { state.sensitivity[ex.id] = Number(inp.value); save(); };
+    inp.oninput = () => { endDiagOnChange("sensitivity"); state.sensitivity[ex.id] = Number(inp.value); save(); };
     box.append(name, inp);
   }
 }
@@ -771,6 +796,9 @@ function process(i, lm, now) {
   t.ema = t.ema == null ? s.h : t.ema * (1 - a) + s.h * a;
   const mult = SENS_MULT[(state.sensitivity[ex.id] ?? 3) - 1];
   const floor = ex.floorFrac * t.scale * mult;
+  // Lower sensitivity raises the smallest countable movement, but never asks for more than 70% of the usual depth:
+  // natural rep-to-rep variation would otherwise reject real full reps.
+  const ampFrac = Math.min(0.7, FULL_REP * mult);
   t.trace.push({ t: now, h: t.ema, rep: false });
   while (t.trace.length && now - t.trace[0].t > TRACE_MS) t.trace.shift();
   if (paused) { setPhase(i, "paused", now); return; }
@@ -788,8 +816,8 @@ function process(i, lm, now) {
 
   const modeBefore = t.det.mode;
   const ev = feed(t.det, t.ema, floor, ex.getUp
-    ? { anchor: ex.anchor, getUpFirst: true, undoFirstAbove: 4 * floor, ampFrac: FULL_REP * mult }
-    : { anchor: ex.anchor, ampFrac: FULL_REP * mult });
+    ? { anchor: ex.anchor, getUpFirst: true, undoFirstAbove: 4 * floor, ampFrac }
+    : { anchor: ex.anchor, ampFrac });
   if (SELFTEST && window.__trace && window.__traceLane === i && t.det.mode !== modeBefore) window.__trace.push({ i, mode: t.det.mode, h: +t.ema.toFixed(4), trough: t.det.trough, swingPeak: t.det.swingPeak, top: t.det.top, start: t.det.start, counted: t.det.counted, need: +t.det.need.toFixed(4), tol: +Math.max(1.5 * floor, 0.5 * (t.det.amp ?? 0)).toFixed(4), missed: t.det.missed, label: window.__label });
   if (SELFTEST && ev && window.__trace) window.__trace.push({ i, ev, h: +t.ema.toFixed(4), trough: +(t.det.trough ?? 0).toFixed(4), top: t.det.top, start: t.det.start, lastPeak: t.det.lastPeak, amp: t.det.amp, need: +t.det.need.toFixed(4), floor: +floor.toFixed(4), label: window.__label });
   if (ev) { diag?.events.push({ t: now, i, ev }); evSink?.push({ t: now, i, ev }); }
@@ -816,8 +844,14 @@ const r5 = v => Math.round(v * 1e5) / 1e5;
 const DIAG_MS = 30000;
 const setDiagStatus = text => { $("diagStatus").textContent = text; };
 function snapshotSettings() {
-  return JSON.parse(JSON.stringify({ plan: state.plan, peopleCount: state.peopleCount, sensitivity: state.sensitivity, custom: state.custom || [],
+  return JSON.parse(JSON.stringify({ autoNext: $("autoNext").checked, plan: state.plan, peopleCount: state.peopleCount, sensitivity: state.sensitivity, custom: state.custom || [],
     people: state.people.map(p => ({ active: p.active, counts: p.counts })) }));
+}
+// A recording replays against the settings it started with, so changing the setup ends it (frames so far are saved).
+function endDiagOnChange(what) {
+  if (!diag || quiet) return;
+  finishDiag();
+  setDiagStatus(`Recording stopped early because the ${what} changed. The part recorded so far was saved.`);
 }
 function startDiag(now, ms = DIAG_MS) {
   diag = { endAt: now + ms, frames: [], events: [], settings: snapshotSettings() };
@@ -843,8 +877,8 @@ function replayDiag(rec) {
   const saved = { state, tracks, frameNow, paused, teach, diag, w: canvas.width, h: canvas.height };
   const events = [];
   try {
-    diag = null; teach = null; paused = false; quiet = true; evSink = events;
-    (rec.settings.custom || []).forEach(c => { if (!MOVES[c.id]) registerCustom(c); });
+    diag = null; teach = null; paused = false; quiet = true; evSink = events; replayAutoNext = rec.settings.autoNext ?? true;
+    (Array.isArray(rec.settings.custom) ? rec.settings.custom : []).filter(validCustom).forEach(c => { if (!MOVES[c.id]) registerCustom({ ...c, name: c.name.slice(0, 40) }); });
     const st = JSON.parse(JSON.stringify(state));
     st.plan = rec.settings.plan; st.peopleCount = rec.settings.peopleCount;
     st.sensitivity = { ...st.sensitivity, ...rec.settings.sensitivity };
@@ -856,7 +890,7 @@ function replayDiag(rec) {
   } finally {
     ({ state, tracks, frameNow, paused, teach, diag } = saved);
     canvas.width = saved.w; canvas.height = saved.h;
-    quiet = false; evSink = null;
+    quiet = false; evSink = null; replayAutoNext = null;
     buildPlan(); renderExSeg(); renderPeople(); renderSets();
   }
   const tally = evs => evs.reduce((r, e) => { r[e.i] += e.ev === "rep" ? 1 : -1; return r; }, Array(MAX_PEOPLE).fill(0));
@@ -878,6 +912,7 @@ function recordTeach(lm) {
   teach.rows.push({ scale: box.diag, v: TEACH_POINTS.map(pt => { const m = mid(lm, pt.idx[0], pt.idx[1] ?? pt.idx[0]); return m && [m.x, m.y]; }) });
 }
 function finishTeach() {
+  endDiagOnChange("workout");
   const { name, lane, rows } = teach;
   teach = null;
   const quant = (vals, f) => vals[Math.floor(f * (vals.length - 1))];
@@ -907,10 +942,11 @@ function finishTeach() {
   setTeachStatus(`Learned "${name}": it follows the ${best.pt.name} moving ${best.axis === "y" ? "up and down" : "side to side"}. It's ticked with a goal of ${MOVES[c.id].target}.`);
 }
 function removeCustom(id) {
+  endDiagOnChange("workout");
   state.custom = state.custom.filter(c => c.id !== id);
   state.plan = state.plan.filter(x => x.id !== id);
   delete MOVES[id]; MOVE_IDS = Object.keys(MOVES);
-  planChanged(); renderMoves();
+  planChanged(); renderMoves(); renderSets();
 }
 
 // ---------- drawing ----------
@@ -1230,9 +1266,9 @@ $("reset").onclick = () => {
     return;
   }
   clearTimeout(resetArmed); resetArmed = null; b.textContent = "Reset all";
-  const keep = { sensitivity: state.sensitivity, peopleCount: state.peopleCount, names: state.people.map(p => p.name), plan: state.plan, prefs: state.prefs };
+  const keep = { sensitivity: state.sensitivity, peopleCount: state.peopleCount, names: state.people.map(p => p.name), plan: state.plan, prefs: state.prefs, custom: state.custom || [] };
   state = blankState();
-  state.sensitivity = keep.sensitivity; state.peopleCount = keep.peopleCount; state.plan = keep.plan; state.prefs = keep.prefs;
+  state.sensitivity = keep.sensitivity; state.peopleCount = keep.peopleCount; state.plan = keep.plan; state.prefs = keep.prefs; state.custom = keep.custom;
   buildPlan();
   state.people.forEach((p, i) => { p.name = keep.names[i]; });
   resetTracking(); tracks.forEach(t => t.advanceAt = null);
@@ -1242,6 +1278,7 @@ $("reset").onclick = () => {
 renderPeopleSeg(); renderMoves(); renderExSeg(); renderPeople(); renderSets(); renderTune();
 $("teachBtn").onclick = () => {
   if (teach) { setTeachStatus("Already learning a movement. Wait for the countdown to finish."); return; }
+  if (diag) { setTeachStatus("Wait for the 30 s diagnostic recording to finish first."); return; }
   if (!running) { setTeachStatus("Start the camera first: teaching watches someone do the movement."); return; }
   startTeach($("teachName").value, Number($("teachWho").value), frameNow || performance.now());
   $("teachName").value = "";
@@ -1249,6 +1286,7 @@ $("teachBtn").onclick = () => {
 if (!SELFTEST && !REPLAY) rearmFinished();
 $("diagBtn").onclick = () => {
   if (diag) { setDiagStatus("Already recording."); return; }
+  if (teach) { setDiagStatus("Wait for the movement being taught to finish first."); return; }
   if (!running) { setDiagStatus("Start the camera first."); return; }
   startDiag(frameNow || performance.now());
   setDiagStatus("Recording for 30 s. Do the reps that get counted wrongly.");
@@ -1652,6 +1690,29 @@ function runSelfTest() {
   const replayed = replayDiag(json);
   check("A diagnostic recording replays to the same counts", [[6, 5, 7], liveReps], [liveReps, replayed.reps.slice(0, 3)]);
   check("Replay leaves the workout untouched", live0.map((c, k) => c + liveReps[k]), counts("pushups"));
+
+  // 22. Pre-launch review findings.
+  window.__label = "22";
+  // (a) A taught movement's name is shown as text, never parsed as HTML (and can't break the person cards).
+  const evil = '<img src=x onerror="window.__xss=1">Dips <slow';
+  startTeach(evil, 0, now);
+  run(sec((TEACH_READY_MS + TEACH_MS) / 1000) + sec(0.5), (i, f) => toLm(place(i === 0 ? raise((solo[f % solo.length] || { p: 0 }).p) : standing, i, S, PY)));
+  const evilMove = state.plan.find(x => MOVES[x.id]?.name === evil);
+  const evilRow = evilMove && $(`row-0-${evilMove.id}`);
+  check("Taught names are text, not HTML", [true, true, undefined], [!!evilRow, evilRow?.querySelector(".n")?.textContent === evil, window.__xss]);
+  // (b) Reset all keeps taught movements (they used to vanish on the next reload).
+  const customBefore = (state.custom || []).length;
+  $("reset").click(); $("reset").click();
+  check("Reset all keeps taught movements", customBefore, (state.custom || []).length);
+  // (c) The sets list names the movement each set was, even after it's unticked.
+  state.sets = [{ p: 0, ex: "squats", reps: 7, start: Date.now() }];
+  state.plan.forEach(x => { x.on = x.id === "pushups"; }); buildPlan(); renderSets();
+  check("Sets keep their movement name after unticking", true, $("sets").textContent.includes("Squats set 1"));
+  // (d) Teaching and a diagnostic recording can't overlap, and a recording ends when the setup changes.
+  startDiag(now, 60000);
+  const teachBlocked = (() => { const before = teach; $("teachName").value = "x"; running = true; $("teachBtn").click(); running = false; const blocked = teach === before; teach = null; return blocked; })();
+  setAllActive("pushups");
+  check("Teaching waits for a recording; a setup change ends the recording", [true, null], [teachBlocked, diag]);
 
   const ok = results.every(r => r.pass);
   console.log("SELFTEST", JSON.stringify({ fps: FPS, sensitivity: SENS, results }));
