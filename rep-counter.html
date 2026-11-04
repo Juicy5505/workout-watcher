@@ -219,7 +219,8 @@ const MAX_PEOPLE = 4;
 const SET_GAP_MS = 20000;
 const TRACE_MS = 10000;
 const ADVANCE_MS = 2500;
-const REST_MS = 4000; // no rep for this long counts as a rest between sets: rep depth is learned again
+const FULL_REP = 0.6; // a rep must cover this share of the person's usual depth (half reps don't count)
+const RESIZE = 0.15;  // body size on camera changing this much (moved closer/farther) makes rep depth re-learn
 const MIN_VIS = 0.3;
 
 // Movements the counter knows. Each one is measured as a height signal (bigger = top of the rep) from landmark
@@ -232,9 +233,11 @@ const MOVES = {
   squats: { name: "Squats", target: 50, floorFrac: 0.06, anchor: "top", needs: ["hip", "knee"], h: k => k.knee.y - k.hip.y },
   lunges: { name: "Lunges", target: 40, floorFrac: 0.05, anchor: "top", needs: ["hip", "ankle"], h: k => k.ankle.y - k.hip.y },
   jacks: { name: "Jumping jacks", target: 100, floorFrac: 0.08, anchor: "bottom", needs: ["sh", "wrist", "hip"], h: k => k.sh.y - k.wrist.y },
-  curls: { name: "Bicep curls", target: 30, floorFrac: 0.04, anchor: "bottom", needs: ["elbow", "wrist"], h: k => k.elbow.y - k.wrist.y },
+  // Arm movements follow whichever arm is higher, so one-arm-at-a-time reps count fully even when the far arm is
+  // partly hidden (averaging the arms would shrink those reps to half reps).
+  curls: { name: "Bicep curls", target: 30, floorFrac: 0.04, anchor: "bottom", needs: ["arms"], h: k => Math.max(...k.arms.map(a => a.elbow.y - a.wrist.y)) },
   // Press counts only height above the shoulders: lifting the weight from arms down to the shoulders isn't a rep.
-  press: { name: "Overhead press", target: 30, floorFrac: 0.05, anchor: "bottom", needs: ["sh", "wrist"], h: k => Math.max(0, k.sh.y - k.wrist.y) },
+  press: { name: "Overhead press", target: 30, floorFrac: 0.05, anchor: "bottom", needs: ["sh", "arms"], h: k => Math.max(0, ...k.arms.map(a => k.sh.y - a.wrist.y)) },
 };
 let MOVE_IDS = Object.keys(MOVES);
 
@@ -252,7 +255,7 @@ function registerCustom(c) {
   };
   MOVE_IDS = Object.keys(MOVES);
 }
-const PART_NAME = { sh: "shoulders", hip: "hips", knee: "knees", ankle: "ankles", elbow: "elbows", wrist: "wrists", legs: "legs" };
+const PART_NAME = { arms: "arms", sh: "shoulders", hip: "hips", knee: "knees", ankle: "ankles", elbow: "elbows", wrist: "wrists", legs: "legs" };
 let EXERCISES = []; // the ticked movements, in order, with this workout's targets (see buildPlan)
 const SENS_MULT = [1.6, 1.3, 1, 0.8, 0.6]; // sensitivity 1–5; higher sensitivity = smaller movement needed
 const PERSON_COLORS = ["--p1", "--p2", "--p3", "--p4"];
@@ -315,7 +318,7 @@ function save() { if (SELFTEST) return; try { localStorage.setItem(STORE_KEY, JS
 
 // Live tracking for each lane (not saved).
 const newTrack = () => ({
-  det: createDetector(), ema: null, lastT: null, scale: null, lastSeen: 0, lastRepT: 0, lm: null, trace: [], flashUntil: 0,
+  det: createDetector(), ema: null, lastT: null, scale: null, repScale: null, lastSeen: 0, lm: null, trace: [], flashUntil: 0,
   phase: "nobody", missing: null, phaseSince: 0, warnedAt: -Infinity, warnArmed: true,
   advanceAt: null,  // frame time when this person moves to their next exercise
   settling: false, settleRef: null, settleT: 0, // after standing up, wait for a still start before counting (see process)
@@ -705,6 +708,9 @@ function signal(t, ex, lm) {
   }
   const k = { sh: mid(lm, 11, 12), hip: mid(lm, 23, 24), knee: mid(lm, 25, 26), ankle: mid(lm, 27, 28), elbow: mid(lm, 13, 14), wrist: mid(lm, 15, 16) };
   k.legs = k.knee || k.ankle;
+  // Each arm on its own (elbow and wrist both in view); null when neither arm is.
+  const arms = [[13, 15], [14, 16]].map(([e, w]) => ({ elbow: mid(lm, e, e), wrist: mid(lm, w, w) })).filter(a => a.elbow && a.wrist);
+  k.arms = arms.length ? arms : null;
   const box = bodyBox(lm);
   // Count only when the parts this movement needs are in view; floor work needs the legs too, so someone sitting
   // at a desk with only head and shoulders on screen never counts.
@@ -770,15 +776,17 @@ function process(i, lm, now) {
     t.settling = false; t.det = createDetector();
   }
   t.settling = false;
-  if (t.det.amp != null && now - t.lastRepT > REST_MS) rest(t.det);
+  // Reps look bigger or smaller when someone moves closer or farther: then, and only then, re-learn the depth.
+  // (Holding still never resets it, so small shifts while holding plank can't pass for a rep.)
+  if (t.det.amp != null && t.repScale && Math.abs(t.scale / t.repScale - 1) > RESIZE) { rest(t.det); t.repScale = null; }
 
   const modeBefore = t.det.mode;
   const ev = feed(t.det, t.ema, floor, ex.getUp
-    ? { anchor: ex.anchor, getUpFirst: true, undoFirstAbove: 4 * floor, ampFrac: 0.4 * mult }
-    : { anchor: ex.anchor, ampFrac: 0.4 * mult });
+    ? { anchor: ex.anchor, getUpFirst: true, undoFirstAbove: 4 * floor, ampFrac: FULL_REP * mult }
+    : { anchor: ex.anchor, ampFrac: FULL_REP * mult });
   if (SELFTEST && window.__trace && window.__traceLane === i && t.det.mode !== modeBefore) window.__trace.push({ i, mode: t.det.mode, h: +t.ema.toFixed(4), trough: t.det.trough, swingPeak: t.det.swingPeak, top: t.det.top, start: t.det.start, counted: t.det.counted, need: +t.det.need.toFixed(4), tol: +Math.max(1.5 * floor, 0.5 * (t.det.amp ?? 0)).toFixed(4), missed: t.det.missed, label: window.__label });
   if (SELFTEST && ev && window.__trace) window.__trace.push({ i, ev, h: +t.ema.toFixed(4), trough: +(t.det.trough ?? 0).toFixed(4), top: t.det.top, start: t.det.start, lastPeak: t.det.lastPeak, amp: t.det.amp, need: +t.det.need.toFixed(4), floor: +floor.toFixed(4), label: window.__label });
-  if (ev === "rep") { addRep(i, now); t.lastRepT = now; t.flashUntil = now + 500; t.trace[t.trace.length - 1].rep = true; }
+  if (ev === "rep") { addRep(i, now); t.repScale = t.scale; t.flashUntil = now + 500; t.trace[t.trace.length - 1].rep = true; }
   if (ev === "undo") { adjust(i, -1); beep(330, 120); const r = [...t.trace].reverse().find(q => q.rep); if (r) r.rep = false; }
   setPhase(i, t.det.mode === "rising" ? "up" : "down", now);
 }
@@ -1238,7 +1246,7 @@ function runSelfTest() {
   const altCurl = s => ({ ...standing, elbow: [1.0, 0.45], elbowR: [1.02, 0.45], wrist: curlWrist(s.r % 2 === 0 ? s.p : 0), wristR: curlWrist(s.r % 2 === 1 ? s.p : 0) });
   const lunge = p => ({ ...standing, head: [1.0, 0.12 + 0.15 * p], shoulder: [1.0, 0.3 + 0.15 * p], elbow: [1.0, 0.48 + 0.15 * p], wrist: [1.0, 0.62 + 0.15 * p], hip: [1.0, 0.6 + 0.15 * p], knee: [1.0 + 0.1 * p, 0.8 + 0.05 * p] });
   const press = p => ({ ...standing, elbow: [1.08, 0.38 - 0.2 * p], wrist: [1.05, 0.28 - 0.25 * p] });
-  const situpAngle = s => s.p * (35 + s.d * 50) * Math.PI / 180;
+  const situpAngle = s => s.p * (65 + s.d * 20) * Math.PI / 180; // full situps: 65–85°
 
   $("voice").checked = false; $("beep").checked = false; $("autoNext").checked = false;
   const S = 0.42; // person size relative to the single-person pose
@@ -1269,7 +1277,7 @@ function runSelfTest() {
     }
     return out;
   };
-  const pushFrame = (i, s) => toLm(place(pushup(s.p, 0.07 + s.d * 0.09), i, S, PY));
+  const pushFrame = (i, s) => toLm(place(pushup(s.p, 0.12 + s.d * 0.04), i, S, PY)); // full pushups: drop 0.12–0.16
   const sitFrame = (i, s, cx, size = S) => toLm(place(situp(situpAngle(s)), i, size, SY, cx));
   const len = plans => Math.max(...plans.map(p => p.length)) + sec(1);
   const start = counts("pushups");
@@ -1319,7 +1327,7 @@ function runSelfTest() {
   // 5. Tracking starts with someone lying at the bottom of a deep pushup. Every rep used to be counted then undone.
   setAllActive("pushups");
   b = counts("pushups");
-  const deep = 0.25;
+  const deep = 0.18;
   run(sec(2), i => toLm(i === 1 ? place(pushup(1, deep), 1, S, PY) : plank(i)));
   run(sec(1), (i, f) => toLm(i === 1 ? place(pushup(1 - (f + 1) / sec(1), deep), 1, S, PY) : plank(i)));
   solo = schedule(15, 1.0, 1.4, 0.5);
@@ -1457,6 +1465,22 @@ function runSelfTest() {
   $("plus-1-situps").click(); $("plus-1-situps").click(); $("minus-1-situps").click();
   check("Typed goal and − / + on a row", [120, "120", s1 + 1, p1], [exById("situps").target, $("goal-2-situps").value, state.people[1].counts.situps, state.people[1].counts.pushups]);
   g.value = "100"; g.dispatchEvent(new Event("change"));
+
+  // 16b. Reported on camera: half reps counted, and reps counted while holding plank. Person 0 does 8 full pushups,
+  // 6 half ones, then holds plank 6 s with two small sags; person 1 does 8 full situps and 6 that only get partway up.
+  window.__label = "16b";
+  setAllActive("pushups"); state.people[1].active = "situps"; resetTracking(1);
+  const hb = [counts("pushups")[0], counts("situps")[1]];
+  run(sec(1), i => i === 0 ? toLm(plank(0)) : i === 1 ? sitFrame(1, { p: 0, d: 0.5 }) : null);
+  const pFull = schedule(8, 1.0, 1.4, 0), pHalf = schedule(6, 0.9, 1.2, 0);
+  const sag = k => place(pushup(0.25 * Math.sin(Math.PI * k), 0.14), 0, S, PY); // shoulders sink ~1/4 rep and come back
+  const plankSet = [...pFull.map(s => place(pushup(s.p, 0.14), 0, S, PY)), ...pHalf.map(s => place(pushup(s.p * 0.45, 0.14), 0, S, PY)),
+    ...Array(sec(3)).fill(plank(0)), ...Array.from({ length: sec(0.8) }, (_, k) => sag(k / sec(0.8))), ...Array(sec(2)).fill(plank(0)),
+    ...Array.from({ length: sec(0.8) }, (_, k) => sag(k / sec(0.8))), ...Array(sec(1)).fill(plank(0))];
+  const sFull = schedule(8, 1.3, 1.8, 0), sHalf = schedule(6, 1.2, 1.6, 0);
+  const situpSet = [...sFull.map(s => ({ ...s, d: 0.8 })), ...sHalf.map(s => ({ ...s, p: s.p * 0.4, d: 0.8 }))];
+  run(Math.max(plankSet.length, situpSet.length) + sec(1), (i, f) => i === 0 ? toLm(plankSet[f] || plank(0)) : i === 1 ? sitFrame(1, situpSet[f] || { p: 0, d: 0.5 }) : null);
+  check("Half reps and holding plank add nothing", [hb[0] + 8, hb[1] + 8], [counts("pushups")[0], counts("situps")[1]]);
 
   // 17. Other movements, one per person at the same time: squats, jumping jacks, bicep curls.
   window.__label = "17";

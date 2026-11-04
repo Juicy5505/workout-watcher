@@ -17,14 +17,15 @@ export function createDetector() {
   };
 }
 
-// Call after a rest between sets: forget the learned rep depth, so a shallower next set still counts from its first
-// rep. The usual top and bottom, and the count of uncounted swings in a row, are kept.
+// Forget the learned rep depth (the page calls this when the person's size on camera changes, i.e. they moved closer
+// or farther away, so reps look bigger or smaller). The usual top and bottom are kept.
 export function rest(d) { d.amp = null; }
 
 const blend = (old, v) => old == null ? v : old * 0.7 + v * 0.3;
 
 // floor: smallest movement that can count as a rep, in the same units as h.
-// opts.anchor: "top" or "bottom" (see above). opts.ampFrac: share of the learned rep depth a rise must reach (0.4).
+// opts.anchor: "top" or "bottom" (see above). opts.ampFrac: share of the learned rep depth a rep must cover (0.4 by
+// default; the page uses 0.6 so half reps don't count).
 // opts.undoFirstAbove: before any rep depth is known, a rise bigger than this undoes the rep (standing up).
 // opts.getUpFirst: a first rise from where tracking started, with no descent seen, is getting up, not a rep.
 // Returns "rep", "undo" or null.
@@ -48,10 +49,10 @@ export function feed(d, h, floor, opts = {}) {
     if (h > d.ext) d.ext = h;
     else if (d.ext - h > hyst) {
       const a = d.ext - d.trough, real = d.counted && !d.undone;
-      // Two uncounted swings in a row, each at least floor: reps got shallower or the person moved, so relearn.
-      // A single uncounted swing (bottom bounce, top wobble) between counted reps never does.
+      // The learned depth comes only from counted reps, so shallower half reps never teach it to accept them.
+      // Two uncounted swings in a row, each at least floor, mean the person moved: relearn where the top/bottom is.
       d.missed = d.counted || a < floor ? 0 : d.missed + 1;
-      if (real || d.missed >= 2) d.amp = blend(d.amp, d.cap != null ? Math.min(a, d.cap) : a);
+      if (real) d.amp = blend(d.amp, d.cap != null ? Math.min(a, d.cap) : a);
       if (real && d.cap == null) { d.top = blend(d.top, d.ext); d.bottom = blend(d.bottom, d.trough); }
       else if (d.missed >= 2) { if (opts.anchor === "top") d.top = d.ext; if (opts.anchor === "bottom") d.bottom = d.trough; }
       if (d.counted) d.lastPeak = d.ext;

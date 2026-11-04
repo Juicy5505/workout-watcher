@@ -1,8 +1,10 @@
 // Regression tests for detector.js on simulated rep signals. Run: node app/tests/test-detector.mjs
 // Robustness across noise patterns: SEED=70 node app/tests/test-detector.mjs (any seed; 7 is the reference run).
-// Mirrors the page: time-based EMA (alpha = min(0.75, 1 - exp(-dt / 48 ms)), so 0.5 at 30 fps), rest() after 4 s
-// without a rep, pushups anchored at the top with getUpFirst and an undo limit, situps anchored at the bottom.
-import { createDetector, feed, rest } from "../detector.js";
+// Mirrors the page: time-based EMA (alpha = min(0.75, 1 - exp(-dt / 48 ms)), so 0.5 at 30 fps), full reps only
+// (ampFrac 0.6), pushups anchored at the top with getUpFirst and an undo limit, situps anchored at the bottom.
+// The page forgets the learned depth (rest()) only when the person's size on camera changes; that has no
+// equivalent in a 1-D signal, so these tests never call it.
+import { createDetector, feed } from "../detector.js";
 
 let seed = Number(process.env.SEED || 7);
 const rand = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
@@ -18,16 +20,14 @@ const hold = (s, v = 0) => [[s, v]];
 // expect: exact count or [min, max]. opts: floor, exercise ("push" | "sit"), fps, noise, undoFirstAbove, start.
 function sim(name, segs, { floor, exercise = "push", fps = 30, noise = 0.006, undoFirstAbove, start = 0, expect }) {
   const d = createDetector(), push = exercise === "push";
-  const opts = push ? { anchor: "top", getUpFirst: true, undoFirstAbove: undoFirstAbove ?? 4 * floor } : { anchor: "bottom" };
+  const opts = push ? { anchor: "top", getUpFirst: true, undoFirstAbove: undoFirstAbove ?? 4 * floor, ampFrac: 0.6 } : { anchor: "bottom", ampFrac: 0.6 };
   const a = Math.min(0.75, 1 - Math.exp(-(1000 / fps) / 48));
-  let ema = null, count = 0, v = start, frame = 0, lastRep = 0;
+  let ema = null, count = 0, v = start;
   const step = x => {
-    frame++;
     const y = x + gauss() * noise;
     ema = ema == null ? y : ema * (1 - a) + y * a;
-    if (d.amp != null && frame - lastRep > 4 * fps) rest(d);
     const ev = feed(d, ema, floor, opts);
-    if (ev === "rep") { count++; lastRep = frame; }
+    if (ev === "rep") count++;
     if (ev === "undo") count--;
   };
   for (let i = 0; i < fps; i++) step(v);
@@ -87,8 +87,15 @@ const bobRep = (height, b) => [[0.7, height], [0.15, height - b], [0.15, height]
 sim("situps, rest 6 s, then a bob at the top of each", [...reps(10, () => sitRep(1.6, 0.3)), ...hold(6), ...reps(10, () => bobRep(0.3, 0.08))], { floor: 0.06, exercise: "sit", noise: 0.003, expect: 20 });
 sim("situps with a stall and sag on the way up", reps(15, () => [[0.5, 0.15], [0.2, 0.13], [0.5, 0.3], [0.8, 0]]), { floor: 0.06, exercise: "sit", noise: 0.003, expect: 15 });
 
+// --- Half reps never count; holding plank never counts ---
+sim("half-depth reps after full ones don't count", [...reps(15, () => pushRep(1.2, 0.18)), ...reps(15, () => pushRep(1.2, 0.08))], { ...B, noise: 0.003, expect: 15 });
+sim("full and half reps mixed: only the full ones count", reps(20, i => pushRep(1.2, i % 2 ? 0.08 : 0.17)), { ...B, noise: 0.003, expect: 10 });
+sim("half situps (partway up) don't count", [...reps(10, () => sitRep(1.6, 0.3)), ...reps(10, () => sitRep(1.6, 0.13))], { floor: 0.06, exercise: "sit", noise: 0.003, expect: 10 });
+const plankShift = (s, by) => [[s, -by], [s, 0]]; // shoulders sink a little and come back while holding plank
+sim("holding plank 10 s with jitter after a set", [...reps(10, () => pushRep(1.2, 0.16)), ...hold(10)], { ...B, noise: 0.012, expect: 10 });
+sim("holding plank with small sags (0.04) after a set", [...reps(10, () => pushRep(1.2, 0.16)), ...hold(5), ...plankShift(0.6, 0.04), ...hold(2), ...plankShift(0.5, 0.045), ...hold(3)], { ...B, noise: 0.006, expect: 10 });
+
 // --- Reps that change: shallower when tired, or the person shifts position ---
-sim("abrupt depth drop 0.18 -> 0.065", [...reps(15, () => pushRep(1.2, 0.18)), ...reps(15, () => pushRep(1.2, 0.065))], { ...B, noise: 0.003, expect: [28, 30] });
 sim("person shifts lower by 0.1 between sets", [...reps(10, () => pushRep(1.2, 0.15)), ...hold(2, -0.1), ...reps(10, () => [[0.6, -0.25], [0.6, -0.1]])], { ...B, expect: [18, 20] });
 sim("person shifts higher by 0.1 between sets", [...reps(10, () => pushRep(1.2, 0.15)), ...hold(2, 0.1), ...reps(10, () => [[0.6, -0.05], [0.6, 0.1]])], { ...B, expect: 20 });
 
