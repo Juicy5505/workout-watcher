@@ -223,7 +223,8 @@ const MOVES = {
   lunges: { name: "Lunges", target: 40, floorFrac: 0.05, anchor: "top", needs: ["hip", "ankle"], h: k => k.ankle.y - k.hip.y },
   jacks: { name: "Jumping jacks", target: 100, floorFrac: 0.08, anchor: "bottom", needs: ["sh", "wrist", "hip"], h: k => k.sh.y - k.wrist.y },
   curls: { name: "Bicep curls", target: 30, floorFrac: 0.04, anchor: "bottom", needs: ["elbow", "wrist"], h: k => k.elbow.y - k.wrist.y },
-  press: { name: "Overhead press", target: 30, floorFrac: 0.05, anchor: "bottom", needs: ["sh", "wrist"], h: k => k.sh.y - k.wrist.y },
+  // Press counts only height above the shoulders: lifting the weight from arms down to the shoulders isn't a rep.
+  press: { name: "Overhead press", target: 30, floorFrac: 0.05, anchor: "bottom", needs: ["sh", "wrist"], h: k => Math.max(0, k.sh.y - k.wrist.y) },
 };
 const MOVE_IDS = Object.keys(MOVES);
 const PART_NAME = { sh: "shoulders", hip: "hips", knee: "knees", ankle: "ankles", elbow: "elbows", wrist: "wrists", legs: "legs" };
@@ -1085,7 +1086,9 @@ function runSelfTest() {
     const put = ([x, y], v = 0.9) => ({ x: 1 - (x + noise(0.003)) / ar, y: y + noise(0.003), visibility: v }); // mirrored like the camera
     const lm = Array.from({ length: 33 }, () => put(pts.head));
     lm[11] = put(pts.shoulder); lm[12] = put([pts.shoulder[0] + 0.005, pts.shoulder[1]], 0.6);
-    lm[13] = put(pts.elbow); lm[14] = put(pts.elbow, 0.5); lm[15] = put(pts.wrist); lm[16] = put(pts.wrist, 0.5);
+    lm[13] = put(pts.elbow); lm[15] = put(pts.wrist);
+    // The other arm mirrors this one unless the pose gives it its own position (alternating curls, one-arm press).
+    lm[14] = put(pts.elbowR ?? pts.elbow, pts.elbowR ? 0.9 : 0.5); lm[16] = put(pts.wristR ?? pts.wrist, pts.wristR ? 0.9 : 0.5);
     lm[23] = put(pts.hip, hipVis); lm[24] = put(pts.hip, hipVis * 0.7);
     lm[25] = put(pts.knee, legVis); lm[26] = put(pts.knee, legVis * 0.7); lm[27] = put(pts.ankle, legVis); lm[28] = put(pts.ankle, legVis * 0.7);
     return lm;
@@ -1106,6 +1109,11 @@ function runSelfTest() {
   const squat = p => ({ ...standing, head: [1.0, 0.12 + 0.2 * p], shoulder: [1.0, 0.3 + 0.2 * p], elbow: [1.08, 0.48 + 0.15 * p], wrist: [1.15, 0.5 + 0.15 * p], hip: [0.95, 0.6 + 0.17 * p], knee: [1.08, 0.8] });
   const jack = p => ({ ...standing, elbow: [1.0 + 0.1 * Math.sin(Math.PI * p), 0.48 - 0.4 * p], wrist: [1.0, 0.62 - 0.62 * p], ankle: [1.0 + 0.1 * p, 0.98] });
   const curl = p => ({ ...standing, elbow: [1.0, 0.45], wrist: [1.0 + 0.1 * Math.sin(Math.PI * p), 0.62 - 0.3 * p] });
+  const curlWrist = p => [1.0 + 0.1 * Math.sin(Math.PI * p), 0.62 - 0.3 * p];
+  // One arm at a time: even reps the left arm, odd reps the right.
+  const altCurl = s => ({ ...standing, elbow: [1.0, 0.45], elbowR: [1.02, 0.45], wrist: curlWrist(s.r % 2 === 0 ? s.p : 0), wristR: curlWrist(s.r % 2 === 1 ? s.p : 0) });
+  const lunge = p => ({ ...standing, head: [1.0, 0.12 + 0.15 * p], shoulder: [1.0, 0.3 + 0.15 * p], elbow: [1.0, 0.48 + 0.15 * p], wrist: [1.0, 0.62 + 0.15 * p], hip: [1.0, 0.6 + 0.15 * p], knee: [1.0 + 0.1 * p, 0.8 + 0.05 * p] });
+  const press = p => ({ ...standing, elbow: [1.08, 0.38 - 0.2 * p], wrist: [1.05, 0.28 - 0.25 * p] });
   const situpAngle = s => s.p * (35 + s.d * 50) * Math.PI / 180;
 
   $("voice").checked = false; $("beep").checked = false; $("autoNext").checked = false;
@@ -1337,6 +1345,20 @@ function runSelfTest() {
   const moveAt = [squat, jack, curl];
   run(len(plans), (i, f) => toLm(place(moveAt[i]((plans[i][f] || { p: 0 }).p), i, S, PY)));
   check("Squats, jumping jacks and curls at the same time", [mb[0] + 12, mb[1] + 15, mb[2] + 10], [counts("squats")[0], counts("jacks")[1], counts("curls")[2]]);
+
+  // 18. Lunges, overhead press, and curls one arm at a time (5 per arm).
+  window.__label = "18";
+  state.plan.forEach(x => { if (["lunges", "press"].includes(x.id)) x.on = true; });
+  buildPlan();
+  ["lunges", "press", "curls"].forEach((id, i) => { state.people[i].active = id; resetTracking(i); });
+  const nb = [counts("lunges")[0], counts("press")[1], counts("curls")[2]];
+  run(sec(1), i => toLm(place(standing, i, S, PY)));
+  plans = [schedule(12, 1.4, 2.2, 0), schedule(10, 1.2, 1.8, 0.2), schedule(10, 1.2, 1.8, 0.1)];
+  run(len(plans), (i, f) => {
+    const s = plans[i][f] || { p: 0, r: -1 };
+    return toLm(place(i === 0 ? lunge(s.p) : i === 1 ? press(s.p) : altCurl(s), i, S, PY));
+  });
+  check("Lunges, overhead press, and alternating curls", [nb[0] + 12, nb[1] + 10, nb[2] + 10], [counts("lunges")[0], counts("press")[1], counts("curls")[2]]);
 
   const ok = results.every(r => r.pass);
   console.log("SELFTEST", JSON.stringify({ fps: FPS, sensitivity: SENS, results }));
