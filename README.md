@@ -16,6 +16,7 @@ Then open http://localhost:8765/rep-counter.html in Chrome or Safari and allow c
 - **Workout:** tick the movements to count and type each one's goal reps. Each person moves to the next ticked movement on their own about 2.5 s after reaching a goal.
 - **Counts:** type into a person's count to set it, or use − / +. The goal can also be typed on any person's row; it's shared by everyone.
 - **Movements:** pushups, situps, squats, lunges, jumping jacks, bicep curls, overhead press.
+- **Teach a movement:** type a name under the movement list, pick who shows it, press **Teach it**, and do about 5 reps in that lane after the 3-second countdown (10 s of watching). The page picks the body point that moved furthest and adds the movement, ticked, with a goal of 20. Remove a taught movement with ✕.
 - **Camera:** floor level, 10–13 ft away, angled about 45°. Floor movements need the whole body in view; curls and press only need arms and shoulders.
 - **Big screen:** press F for a fullscreen view readable from the floor.
 - **Sound:** a beep on each rep. Spoken callouts are off by default (toggle under Controls).
