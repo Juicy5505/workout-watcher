@@ -1081,14 +1081,15 @@ function runSelfTest() {
   // Pose points are in screen frame-height units around (1.0, 1.0); each person is shrunk and moved into a lane.
   // cx overrides the lane center (screen x in frame-height units).
   const place = (pts, lane, s, yBase, cx = (lane + 0.5) / 3 * ar) =>
-    Object.fromEntries(Object.entries(pts).map(([k, [x, y]]) => [k, [cx + (x - 1.0) * s, yBase + (y - 1.0) * s]]));
+    Object.fromEntries(Object.entries(pts).map(([k, v]) => [k, Array.isArray(v) ? [cx + (v[0] - 1.0) * s, yBase + (v[1] - 1.0) * s] : v]));
   const toLm = (pts, legVis = 0.9, hipVis = 0.9) => {
     const put = ([x, y], v = 0.9) => ({ x: 1 - (x + noise(0.003)) / ar, y: y + noise(0.003), visibility: v }); // mirrored like the camera
     const lm = Array.from({ length: 33 }, () => put(pts.head));
     lm[11] = put(pts.shoulder); lm[12] = put([pts.shoulder[0] + 0.005, pts.shoulder[1]], 0.6);
     lm[13] = put(pts.elbow); lm[15] = put(pts.wrist);
     // The other arm mirrors this one unless the pose gives it its own position (alternating curls, one-arm press).
-    lm[14] = put(pts.elbowR ?? pts.elbow, pts.elbowR ? 0.9 : 0.5); lm[16] = put(pts.wristR ?? pts.wrist, pts.wristR ? 0.9 : 0.5);
+    const rv = pts.armRVis ?? (pts.elbowR ? 0.9 : 0.5);
+    lm[14] = put(pts.elbowR ?? pts.elbow, rv); lm[16] = put(pts.wristR ?? pts.wrist, rv);
     lm[23] = put(pts.hip, hipVis); lm[24] = put(pts.hip, hipVis * 0.7);
     lm[25] = put(pts.knee, legVis); lm[26] = put(pts.knee, legVis * 0.7); lm[27] = put(pts.ankle, legVis); lm[28] = put(pts.ankle, legVis * 0.7);
     return lm;
@@ -1359,6 +1360,20 @@ function runSelfTest() {
     return toLm(place(i === 0 ? lunge(s.p) : i === 1 ? press(s.p) : altCurl(s), i, S, PY));
   });
   check("Lunges, overhead press, and alternating curls", [nb[0] + 12, nb[1] + 10, nb[2] + 10], [counts("lunges")[0], counts("press")[1], counts("curls")[2]]);
+
+  // 19. Side-on to the camera, the far arm is partly hidden (low visibility): alternating curls must still count each
+  // arm, and a one-arm press with the far arm must count.
+  window.__label = "19";
+  ["curls", "press", "curls"].forEach((id, i) => { state.people[i].active = id; resetTracking(i); });
+  const ab = [counts("curls")[0], counts("press")[1], counts("curls")[2]];
+  run(sec(1), i => toLm(place(standing, i, S, PY)));
+  const farPress = p => ({ ...standing, elbow: [1.08, 0.38], wrist: [1.05, 0.28], elbowR: [1.1, 0.38 - 0.2 * p], wristR: [1.07, 0.28 - 0.25 * p], armRVis: 0.4 });
+  plans = [schedule(10, 1.2, 1.8, 0), schedule(10, 1.2, 1.8, 0.2), schedule(10, 1.2, 1.8, 0.1)];
+  run(len(plans), (i, f) => {
+    const s = plans[i][f] || { p: 0, r: -1 };
+    return toLm(place(i === 1 ? farPress(s.p) : { ...altCurl(s), armRVis: i === 0 ? 0.4 : 0.9 }, i, S, PY));
+  });
+  check("Far arm partly hidden: alternating curls and one-arm press", [ab[0] + 10, ab[1] + 10, ab[2] + 10], [counts("curls")[0], counts("press")[1], counts("curls")[2]]);
 
   const ok = results.every(r => r.pass);
   console.log("SELFTEST", JSON.stringify({ fps: FPS, sensitivity: SENS, results }));
