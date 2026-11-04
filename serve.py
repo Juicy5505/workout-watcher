@@ -1,5 +1,5 @@
 # Serves this folder at http://localhost:8765 with browser caching turned off, so a reload always picks up the
-# latest rep-counter.html and detector.js. Run: caffeinate -di python3 serve.py
+# latest index.html and detector.js. Run: caffeinate -di python3 serve.py
 import http.server
 import os
 

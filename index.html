@@ -1,0 +1,1668 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Workout Watcher</title>
+<meta name="description" content="Workout Watcher counts your reps with your camera: pushups, situps, squats and more, for up to 4 people at once. Runs in your browser; video never leaves your device.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23111318'/%3E%3Cpath d='M6 21l5-10 5 7 4-5 6 8' fill='none' stroke='%23ffad1f' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Barlow:wght@400;500;600&display=swap">
+<style>
+/* Layout: camera stage (split into one lane per person) on the left, per-person counters + controls rail on the right. */
+:root {
+  --bg: #111318;
+  --panel: #1a1d24;
+  --line: #2a2f3a;
+  --fg: #e8eaef;
+  --muted: #8b91a1;
+  --accent: #ffad1f;   /* active selection */
+  --up: #3cc8b0;       /* target reached / top of rep */
+  --down: #ff7a45;     /* bottom of rep, errors */
+  --warn: #c9a0ff;     /* out of position */
+  --p1: #ffad1f;       /* person colors, left → right */
+  --p2: #4fb3ff;
+  --p3: #ff6fa8;
+  --p4: #a6e05a;
+  --display: "Barlow Condensed", "Arial Narrow", system-ui, sans-serif;
+  --body: "Barlow", system-ui, -apple-system, "Segoe UI", sans-serif;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.45 var(--body); }
+.wrap { max-width: 1360px; margin: 0 auto; padding-block: 20px 40px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); display: grid; gap: 20px; grid-template-columns: minmax(0, 1fr) 360px; }
+@media (max-width: 960px) { .wrap { grid-template-columns: minmax(0, 1fr); } }
+header { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px 16px; }
+h1 { font: 700 32px/1 var(--display); letter-spacing: .02em; text-transform: uppercase; margin: 0; }
+#status { color: var(--muted); font-size: 14px; }
+#status.ok { color: var(--up); }
+#status.err { color: var(--down); }
+
+.stage { position: relative; background: #000; border-radius: 10px; overflow: hidden; aspect-ratio: 16 / 9; max-width: 100%; display: grid; place-items: center; }
+.stage:fullscreen { border-radius: 0; aspect-ratio: auto; width: 100%; height: 100%; }
+.stage canvas { width: 100%; height: 100%; object-fit: contain; display: block; }
+.stage video { display: none; }
+.placeholder { position: absolute; inset: 0; display: grid; place-content: center; gap: 14px; text-align: center; padding: 24px; color: var(--muted); }
+.placeholder p { margin: 0; max-width: 52ch; }
+.sound-gate { position: absolute; left: 0; right: 0; bottom: 0; padding: 2vh 16px; font: 700 clamp(20px, 4vw, 48px)/1.1 var(--display); letter-spacing: .02em; background: rgba(200, 40, 40, .88); color: #fff; border: 0; cursor: pointer; z-index: 2; }
+.readout { display: flex; flex-wrap: wrap; gap: 10px 22px; align-items: center; margin-top: 12px; }
+.metric { color: var(--muted); font-size: 14px; font-variant-numeric: tabular-nums; }
+.metric b { color: var(--fg); font-weight: 600; }
+#trace { width: 100%; height: 90px; display: block; margin-top: 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+
+aside { display: flex; flex-direction: column; gap: 18px; min-width: 0; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+.label { font: 600 13px/1 var(--display); letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+.seg { display: flex; flex-wrap: wrap; gap: 6px; }
+.seg button { flex: 1; font: 600 17px/1 var(--display); letter-spacing: .04em; text-transform: uppercase; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--line); background: none; color: var(--muted); cursor: pointer; }
+.seg button[aria-pressed="true"] { border-color: var(--accent); color: var(--fg); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+
+.moves { display: grid; grid-template-columns: 1fr auto; gap: 6px 10px; align-items: center; }
+.moves label { display: flex; align-items: center; gap: 8px; font-size: 15px; cursor: pointer; }
+.moves input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--accent); }
+.moves .tgt { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; }
+.moves .tgt input { width: 64px; background: var(--bg); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; font: 600 15px var(--body); font-variant-numeric: tabular-nums; }
+.moves .tgt input:disabled { opacity: .4; }
+.moves .del { background: none; border: 0; color: var(--muted); cursor: pointer; font-size: 15px; padding: 2px 4px; }
+.moves .del:hover { color: var(--down); }
+.teach { display: flex; flex-wrap: wrap; gap: 6px; }
+.teach input { flex: 1 1 140px; min-width: 0; background: var(--bg); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 7px 8px; font: inherit; }
+.person { border-left: 4px solid var(--pc); padding: 10px 0 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+.person + .person { border-top: 1px solid var(--line); }
+.phead { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.pname { flex: 1; min-width: 0; font: 600 20px/1.1 var(--display); text-transform: uppercase; letter-spacing: .03em; color: var(--pc); background: none; border: 1px solid transparent; border-radius: 6px; padding: 2px 4px; }
+.pname:hover { border-color: var(--line); }
+.lane { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
+.pill { font: 600 13px/1 var(--display); letter-spacing: .08em; text-transform: uppercase; padding: 5px 9px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+.pill[data-phase="up"] { color: var(--up); border-color: var(--up); }
+.pill[data-phase="down"] { color: var(--down); border-color: var(--down); }
+.pill[data-phase="standing"], .pill[data-phase="unclear"] { color: var(--warn); border-color: var(--warn); }
+.exrow { display: grid; grid-template-columns: minmax(70px, 1fr) auto auto; gap: 4px 8px; align-items: center; }
+.exrow .ctl { display: flex; align-items: center; gap: 4px; }
+.exrow .ctl button { width: 30px; height: 30px; padding: 0; font: 600 18px/1 var(--body); }
+.exrow .goal { display: flex; align-items: center; gap: 4px; color: var(--muted); font-size: 13px; }
+.exrow .n { color: var(--muted); font-size: 13px; text-transform: uppercase; letter-spacing: .05em; }
+.exrow.on .n { color: var(--fg); }
+.exrow input { width: 72px; font: 700 24px/1.1 var(--display); font-variant-numeric: tabular-nums; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 2px 6px; }
+.exrow input:hover { border-color: var(--muted); }
+.exrow .goal input { width: 60px; font: 600 15px/1.2 var(--body); color: var(--muted); }
+.exrow.on .ctl input { color: var(--pc); }
+.exrow.done .ctl input { color: var(--up); }
+.exrow small { color: var(--muted); font-size: 14px; }
+.exrow .bar { grid-column: 1 / -1; height: 5px; background: var(--line); border-radius: 3px; overflow: hidden; }
+.exrow .bar i { display: block; height: 100%; width: 0; background: var(--pc); transition: width .2s; }
+.exrow.done .bar i { background: var(--up); }
+
+.row { display: flex; flex-wrap: wrap; gap: 8px; }
+button.btn { font: 600 15px/1 var(--body); padding: 10px 14px; border-radius: 8px; border: 1px solid var(--line); background: #232733; color: var(--fg); cursor: pointer; }
+button.btn.sm { padding: 7px 10px; font-size: 14px; }
+button.btn:hover:not(:disabled) { border-color: var(--muted); }
+button.btn:disabled { opacity: .45; cursor: not-allowed; }
+button.btn.rec[aria-pressed="true"] { background: var(--down); border-color: var(--down); color: #1a0a04; }
+button.btn.danger { color: var(--down); }
+button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+select { background: var(--bg); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; font: inherit; }
+
+.toggle { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 14px; }
+.sets { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; font-variant-numeric: tabular-nums; font-size: 14px; max-height: 180px; overflow-y: auto; }
+.sets li { display: flex; justify-content: space-between; gap: 8px; color: var(--muted); }
+.sets li b { color: var(--fg); font-weight: 600; }
+.empty { color: var(--muted); font-size: 14px; margin: 0; }
+#recordings a { color: var(--accent); word-break: break-all; font-size: 14px; }
+
+details summary { cursor: pointer; color: var(--muted); font-size: 14px; }
+.tune { display: grid; grid-template-columns: 90px 1fr; gap: 8px 10px; align-items: center; margin-top: 10px; font-size: 14px; }
+.tune input { width: 100%; accent-color: var(--accent); }
+.tune .h { color: var(--muted); font-size: 12px; grid-column: 1 / -1; }
+.tips { margin: 0; padding-left: 18px; color: var(--muted); font-size: 14px; display: flex; flex-direction: column; gap: 4px; }
+@media (prefers-reduced-motion: reduce) { .exrow .bar i { transition: none; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Workout Watcher</h1>
+    <span id="status">Loading pose model…</span>
+  </header>
+
+  <main>
+    <div class="stage" id="stage">
+      <video id="video" playsinline muted></video>
+      <canvas id="canvas" width="1280" height="720"></canvas>
+      <div class="placeholder" id="placeholder">
+        <p id="placeholderMsg">Starting camera…</p>
+        <p>Camera at floor level, 3–4 m (10–13 ft) away, angled about 45° to the side. Each person stays in their own lane of the picture; lines on the video mark the lanes.</p>
+      </div>
+      <button id="soundGate" class="sound-gate" hidden>Sound is off. Click anywhere to turn it on.</button>
+    </div>
+    <div class="readout">
+      <span class="metric" id="clock">Elapsed <b>0:00</b></span>
+      <span class="metric" id="detfps"></span>
+      <span class="metric">Runs entirely in your browser: video never leaves your device.</span>
+    </div>
+    <canvas id="trace" width="1200" height="180" aria-label="Shoulder movement for each person over the last 10 seconds; dots mark counted reps"></canvas>
+  </main>
+
+  <aside>
+    <section class="card">
+      <span class="label">People in the workout</span>
+      <div class="seg" id="peopleSeg" role="group" aria-label="Number of people"></div>
+      <span class="label">Workout: tick the movements to count</span>
+      <div class="moves" id="moves"></div>
+      <div class="teach">
+        <input id="teachName" maxlength="40" placeholder="Not on the list? Name it" aria-label="Name of a movement to teach">
+        <select id="teachWho" aria-label="Who shows the movement"></select>
+        <button class="btn" id="teachBtn">Teach it</button>
+      </div>
+      <p class="empty" id="teachStatus">To add a movement, name it, press Teach it, and do about 5 reps in your lane when the countdown ends.</p>
+      <span class="label">Counting now (sets everyone)</span>
+      <div class="seg" id="exSeg"></div>
+    </section>
+
+    <section class="card">
+      <span class="label">People (left to right on screen)</span>
+      <div id="people"></div>
+    </section>
+
+    <section class="card">
+      <span class="label">Controls</span>
+      <div class="row">
+        <button class="btn" id="big">Big screen (F)</button>
+        <button class="btn" id="pause" disabled>Pause counting</button>
+        <button class="btn rec" id="rec" aria-pressed="false" disabled>Record video</button>
+        <button class="btn danger" id="reset">Reset all</button>
+      </div>
+      <label class="toggle"><input type="checkbox" id="voice"> Spoken callouts (every 10 reps and warnings)</label>
+      <label class="toggle"><input type="checkbox" id="beep" checked> Beep on each rep</label>
+      <label class="toggle"><input type="checkbox" id="autoNext" checked> Move each person to the next exercise when they hit their target</label>
+    </section>
+
+    <section class="card">
+      <span class="label">Sets</span>
+      <ul class="sets" id="sets"></ul>
+      <p class="empty" id="setsEmpty">No reps yet. A new set starts after a 20-second rest.</p>
+    </section>
+
+    <section class="card">
+      <span class="label">Recordings</span>
+      <div id="recordings"><p class="empty">Recordings include the count overlay and save as video files.</p></div>
+    </section>
+
+    <section class="card">
+      <details>
+        <summary>Tuning and tips</summary>
+        <div class="tune" id="tune">
+          <span class="h">Sensitivity: raise it if reps are missed, lower it if extra reps appear.</span>
+        </div>
+        <div class="row" style="margin-top:12px"><button class="btn" id="diagBtn">Record 30 s for diagnosis</button></div>
+        <p class="empty" id="diagStatus">If reps are counted wrongly, record the reps that go wrong. It saves what the camera's pose tracker saw (no video) so the problem can be replayed and fixed.</p>
+        <ul class="tips" style="margin-top:12px">
+          <li>Each person must stay inside their lane. Lines on the video mark the lanes.</li>
+          <li>Counting needs each person's shoulders, hips and legs in view. A lane that can't see someone turns purple and says what's missing.</li>
+          <li>Each person moves to the next ticked movement on their own about 2.5 s after reaching its target.</li>
+          <li>Pushups: shoulder height (counting pauses while standing). Situps: shoulders above hips. Squats: hips above knees. Lunges: hips above ankles. Jumping jacks and overhead press: wrists above shoulders. Bicep curls: wrists above elbows (both arms together).</li>
+          <li>Floor movements need the whole body in view; curls and press only need the arms and shoulders.</li>
+          <li>Press F or "Big screen" so counts can be read from the floor.</li>
+          <li>Type into any count to correct it, or use −1 / +1.</li>
+        </ul>
+      </details>
+    </section>
+  </aside>
+</div>
+
+<script type="module">
+import { PoseLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
+import { createDetector, feed, rest } from "./detector.js?v=2"; // ?v=2 skips copies cached before serve.py turned caching off
+
+const WASM = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm";
+const MODEL = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task";
+const SELFTEST = location.hash.startsWith("#selftest"); // feeds synthetic poses instead of the camera; never saves. #selftest&fps=15
+const REPLAY = location.hash.startsWith("#replay");     // runs a saved diagnostic recording instead of the camera; never saves
+const STORE_KEY = "repcounter.v4"; // v4: workout plan of ticked movements; v3 saves are migrated
+const MAX_PEOPLE = 4;
+const SET_GAP_MS = 20000;
+const TRACE_MS = 10000;
+const ADVANCE_MS = 2500;
+const FULL_REP = 0.6; // a rep must cover this share of the person's usual depth (half reps don't count)
+const RESIZE = 0.15;  // body size on camera changing this much (moved closer/farther) makes rep depth re-learn
+const MIN_VIS = 0.3;
+
+// Movements the counter knows. Each one is measured as a height signal (bigger = top of the rep) from landmark
+// midpoints k (sh, hip, knee, ankle, elbow, wrist; frame-height units), needs those landmarks in view, and rests at
+// one end of the rep (anchor). floorFrac: smallest movement that can count, as a fraction of body size.
+// getUp: floor work that ignores getting up from the floor and takes back a rep that turns into standing up.
+const MOVES = {
+  pushups: { name: "Pushups", target: 20, floorFrac: 0.05, anchor: "top", getUp: true, needs: ["sh", "hip", "legs"], h: k => -k.sh.y },
+  situps: { name: "Situps", target: 20, floorFrac: 0.06, anchor: "bottom", needs: ["sh", "hip", "legs"], h: k => k.hip.y - k.sh.y },
+  squats: { name: "Squats", target: 20, floorFrac: 0.06, anchor: "top", needs: ["hip", "knee"], h: k => k.knee.y - k.hip.y },
+  lunges: { name: "Lunges", target: 20, floorFrac: 0.05, anchor: "top", needs: ["hip", "ankle"], h: k => k.ankle.y - k.hip.y },
+  jacks: { name: "Jumping jacks", target: 30, floorFrac: 0.08, anchor: "bottom", needs: ["sh", "wrist", "hip"], h: k => k.sh.y - k.wrist.y },
+  // Arm movements follow whichever arm is higher, so one-arm-at-a-time reps count fully even when the far arm is
+  // partly hidden (averaging the arms would shrink those reps to half reps).
+  curls: { name: "Bicep curls", target: 12, floorFrac: 0.04, anchor: "bottom", needs: ["arms"], h: k => Math.max(...k.arms.map(a => a.elbow.y - a.wrist.y)) },
+  // Press counts only height above the shoulders: lifting the weight from arms down to the shoulders isn't a rep.
+  press: { name: "Overhead press", target: 12, floorFrac: 0.05, anchor: "bottom", needs: ["sh", "arms"], h: k => Math.max(0, ...k.arms.map(a => k.sh.y - a.wrist.y)) },
+};
+let MOVE_IDS = Object.keys(MOVES);
+
+// Movements taught on the page: one body point (or left/right pair) along x or y, signed so a rep rises from rest.
+const TEACH_POINTS = [
+  { name: "head", idx: [0] }, { name: "shoulders", idx: [11, 12] }, { name: "left elbow", idx: [13] }, { name: "right elbow", idx: [14] },
+  { name: "left wrist", idx: [15] }, { name: "right wrist", idx: [16] }, { name: "hips", idx: [23, 24] },
+  { name: "left knee", idx: [25] }, { name: "right knee", idx: [26] }, { name: "left ankle", idx: [27] }, { name: "right ankle", idx: [28] },
+];
+const TEACH_READY_MS = 3000, TEACH_MS = 10000;
+function registerCustom(c) {
+  MOVES[c.id] = {
+    name: c.name, target: 20, floorFrac: c.floorFrac, anchor: "bottom", custom: true, part: c.part,
+    hl: lm => { const m = mid(lm, c.idx[0], c.idx[1] ?? c.idx[0]); return m && c.sign * m[c.axis]; },
+  };
+  MOVE_IDS = Object.keys(MOVES);
+}
+const PART_NAME = { arms: "arms", sh: "shoulders", hip: "hips", knee: "knees", ankle: "ankles", elbow: "elbows", wrist: "wrists", legs: "legs" };
+let EXERCISES = []; // the ticked movements, in order, with this workout's targets (see buildPlan)
+const SENS_MULT = [1.6, 1.3, 1, 0.8, 0.6]; // sensitivity 1–5; higher sensitivity = smaller movement needed
+const PERSON_COLORS = ["--p1", "--p2", "--p3", "--p4"];
+const BEEP_PITCH = [880, 1175, 660, 990];
+const BONES = [[11,12],[11,13],[13,15],[12,14],[14,16],[11,23],[12,24],[23,24],[23,25],[25,27],[24,26],[26,28]];
+
+const $ = id => document.getElementById(id);
+const video = $("video"), canvas = $("canvas"), ctx = canvas.getContext("2d");
+const cssVar = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const COLOR = { up: cssVar("--up"), person: PERSON_COLORS.map(cssVar) }; // read once, not per frame
+
+// ---------- state ----------
+function blankState() {
+  return {
+    plan: MOVE_IDS.map(id => ({ id, on: id === "pushups" || id === "situps", target: MOVES[id].target })),
+    active: "pushups",  // last movement picked for everyone; each person also has their own
+    peopleCount: 1,
+    people: Array.from({ length: MAX_PEOPLE }, (_, i) => ({
+      name: `Person ${i + 1}`,
+      counts: Object.fromEntries(MOVE_IDS.map(id => [id, 0])),
+      lastRepAt: 0,
+      active: "pushups",
+    })),
+    sets: [],               // { p, ex, reps, start }
+    sensitivity: Object.fromEntries(MOVE_IDS.map(id => [id, 3])),
+    prefs: { voice: false, beep: true, autoNext: true },
+    custom: [],             // taught movements (see registerCustom)
+  };
+}
+let state = SELFTEST ? blankState() : load();
+function load() {
+  try {
+    let s = JSON.parse(localStorage.getItem(STORE_KEY));
+    if (!s) s = JSON.parse(localStorage.getItem("repcounter.v3")); // pushups/situps workout from before the plan existed
+    (s?.custom || []).forEach(registerCustom); // before blankState, so the plan and counts include taught movements
+    const b = blankState();
+    if (s && Array.isArray(s.people)) {
+      const m = { ...b, ...s, prefs: { ...b.prefs, ...s.prefs }, sensitivity: { ...b.sensitivity, ...s.sensitivity } };
+      m.plan = b.plan.map(x => ({ ...x, ...(s.plan || []).find(y => y.id === x.id) }));
+      m.people = b.people.map((p, i) => { const q = s.people[i] || {}; return { ...p, ...q, counts: { ...p.counts, ...q.counts } }; });
+      m.peopleCount = Math.min(MAX_PEOPLE, Math.max(1, Number(m.peopleCount) || 3));
+      m.custom = s.custom || [];
+      return m;
+    }
+    return b;
+  } catch {}
+  return blankState();
+}
+// The ticked movements become this workout's exercises; everyone's current movement must be one of them.
+function buildPlan() {
+  if (!state.plan.some(x => x.on)) state.plan[0].on = true;
+  EXERCISES = state.plan.filter(x => x.on).map(x => ({ id: x.id, ...MOVES[x.id], target: x.target }));
+  for (const p of state.people) {
+    if (EXERCISES.some(e => e.id === p.active)) continue;
+    p.active = (EXERCISES.find(e => p.counts[e.id] < e.target) ?? EXERCISES[0]).id;
+  }
+}
+buildPlan();
+function save() { if (SELFTEST || REPLAY) return; try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); } catch {} }
+
+// Live tracking for each lane (not saved).
+const newTrack = () => ({
+  det: createDetector(), ema: null, lastT: null, scale: null, repScale: null, lastSeen: 0, lm: null, trace: [], flashUntil: 0,
+  phase: "nobody", missing: null, phaseSince: 0, warnedAt: -Infinity, warnArmed: true,
+  advanceAt: null,  // frame time when this person moves to their next exercise
+  settling: false, settleRef: null, settleT: 0, // after standing up, wait for a still start before counting (see process)
+  bigSince: null,   // when a much larger pose (someone walking past) started filling this lane
+});
+let tracks = Array.from({ length: MAX_PEOPLE }, newTrack);
+// keepPeak: after a short tracking gap, remember the last rep's top so a rep that resumes at the bottom isn't undone.
+function resetTracking(i, keepPeak = false) {
+  if (i == null) { tracks.forEach((_, k) => resetTracking(k)); return; }
+  const t = tracks[i], peak = t.det.lastPeak;
+  t.det = createDetector(); t.ema = null; t.lastT = null;
+  if (keepPeak) t.det.lastPeak = peak;
+}
+let paused = false, landmarker = null, stream = null, running = false, lastVideoTime = -1, startedAt = null;
+let frameNow = 0; // time of the latest processed frame; the self-test runs on its own synthetic clock
+
+const exById = id => EXERCISES.find(e => e.id === id) ?? EXERCISES[0];
+const LANE_NAMES = [["Whole picture"], ["Left", "Right"], ["Left", "Middle", "Right"], ["Far left", "Left", "Right", "Far right"]];
+const laneName = (i, n) => LANE_NAMES[n - 1][i];
+const activePeople = () => state.people.slice(0, state.peopleCount);
+
+function setAllActive(id) {
+  state.active = id;
+  state.people.forEach(p => p.active = id);
+  tracks.forEach(t => t.advanceAt = null); // a manual switch cancels any pending automatic one
+  resetTracking(); save(); renderExSeg(); updatePeople();
+}
+
+// Schedule a move to this person's next unfinished exercise.
+function armAdvance(i, now) {
+  const p = state.people[i];
+  if ($("autoNext").checked && EXERCISES.some(e => e.id !== p.active && p.counts[e.id] < e.target)) tracks[i].advanceAt = now + ADVANCE_MS;
+}
+// Anyone already at their target with no switch pending (after a reload, a People change, or turning the option on).
+function rearmFinished() {
+  for (let i = 0; i < state.peopleCount; i++) {
+    const p = state.people[i], ex = exById(p.active);
+    if (tracks[i].advanceAt == null && p.counts[ex.id] >= ex.target) armAdvance(i, frameNow || performance.now());
+  }
+}
+function checkAdvance(i, now) {
+  const t = tracks[i], p = state.people[i];
+  if (t.advanceAt == null || now < t.advanceAt) return;
+  t.advanceAt = null;
+  if (!$("autoNext").checked) return;
+  const cur = exById(p.active);
+  if (p.counts[cur.id] < cur.target) return; // a rep was undone or −1 pressed in the meantime
+  const nx = EXERCISES.find(e => p.counts[e.id] < e.target);
+  if (nx && nx.id !== p.active) { p.active = nx.id; resetTracking(i); save(); renderExSeg(); updatePeople(); say(`${p.name}, ${nx.name} now`); }
+}
+
+// ---------- UI ----------
+function renderPeopleSeg() {
+  const seg = $("peopleSeg");
+  seg.innerHTML = "";
+  for (let n = 1; n <= MAX_PEOPLE; n++) {
+    const b = document.createElement("button");
+    b.textContent = n === 1 ? "1 person" : `${n} people`;
+    b.setAttribute("aria-pressed", String(state.peopleCount === n));
+    b.onclick = () => {
+      if (state.peopleCount === n) return;
+      state.peopleCount = n;
+      tracks = Array.from({ length: MAX_PEOPLE }, newTrack);
+      save(); renderPeopleSeg(); renderExSeg(); renderPeople(); renderSets(); rearmFinished();
+    };
+    seg.appendChild(b);
+  }
+}
+
+function renderMoves() {
+  const box = $("moves");
+  box.innerHTML = "";
+  for (const x of state.plan) {
+    const label = document.createElement("label");
+    const cb = document.createElement("input");
+    cb.type = "checkbox"; cb.id = `move-${x.id}`; cb.checked = x.on;
+    label.append(cb, document.createTextNode(MOVES[x.id].name));
+    const tgt = document.createElement("span"); tgt.className = "tgt";
+    const num = document.createElement("input");
+    num.type = "number"; num.min = 1; num.max = 9999; num.id = `target-${x.id}`; num.value = x.target; num.disabled = !x.on;
+    num.setAttribute("aria-label", `${MOVES[x.id].name} target`);
+    tgt.append(num, document.createTextNode("goal reps"));
+    cb.onchange = () => {
+      if (!cb.checked && state.plan.filter(y => y.on).length === 1) { cb.checked = true; return; } // keep at least one
+      x.on = cb.checked; num.disabled = !x.on; planChanged();
+    };
+    num.onkeydown = e => { if (e.key === "Enter") num.blur(); };
+    num.onchange = () => setGoal(x.id, num);
+    if (MOVES[x.id].custom) {
+      const del = document.createElement("button");
+      del.className = "del"; del.textContent = "✕"; del.setAttribute("aria-label", `Remove ${MOVES[x.id].name}`);
+      del.onclick = () => removeCustom(x.id);
+      tgt.append(del);
+    }
+    box.append(label, tgt);
+  }
+}
+// Goal reps for a movement, typed in the Workout list or on a person's row. Invalid entries are put back.
+function setGoal(id, input) {
+  const x = state.plan.find(y => y.id === id), v = Math.round(Number(input.value));
+  if (input.value.trim() === "" || !(v >= 1 && v <= 9999)) { input.value = x.target; return; }
+  x.target = v;
+  buildPlan(); save(); renderMoves(); renderExSeg(); updatePeople(); rearmFinished();
+}
+function planChanged() {
+  buildPlan(); resetTracking(); tracks.forEach(t => t.advanceAt = null);
+  save(); renderExSeg(); renderPeople(); renderTune(); rearmFinished();
+}
+
+function renderExSeg() {
+  const seg = $("exSeg");
+  seg.innerHTML = "";
+  for (const ex of EXERCISES) {
+    const b = document.createElement("button");
+    b.textContent = `${ex.name} · ${ex.target}`;
+    b.setAttribute("aria-pressed", String(activePeople().every(p => p.active === ex.id)));
+    b.onclick = () => setAllActive(ex.id);
+    seg.appendChild(b);
+  }
+}
+
+function renderTeachWho() {
+  const sel = $("teachWho"), keep = sel.value;
+  sel.innerHTML = "";
+  for (let i = 0; i < state.peopleCount; i++) {
+    const o = document.createElement("option");
+    o.value = String(i); o.textContent = `${state.people[i].name} shows it`;
+    sel.appendChild(o);
+  }
+  if (Number(keep) < state.peopleCount) sel.value = keep;
+}
+
+function renderPeople() {
+  renderTeachWho();
+  const box = $("people");
+  box.innerHTML = "";
+  for (let i = 0; i < state.peopleCount; i++) {
+    const p = state.people[i];
+    const card = document.createElement("div");
+    card.className = "person"; card.style.setProperty("--pc", `var(${PERSON_COLORS[i]})`);
+    card.innerHTML = `
+      <div class="phead">
+        <input class="pname" id="name-${i}" aria-label="Name for person ${i + 1}">
+        <span class="lane">${laneName(i, state.peopleCount)}</span>
+        <span class="pill" id="phase-${i}" data-phase="nobody">Not in frame</span>
+      </div>
+      ${EXERCISES.map(ex => `
+      <div class="exrow" id="row-${i}-${ex.id}">
+        <span class="n">${ex.name}</span>
+        <span class="ctl">
+          <button class="btn" id="minus-${i}-${ex.id}" aria-label="One less ${ex.name.toLowerCase()} for person ${i + 1}">−</button>
+          <input type="number" min="0" max="9999" id="cnt-${i}-${ex.id}" aria-label="${ex.name} done by person ${i + 1}">
+          <button class="btn" id="plus-${i}-${ex.id}" aria-label="One more ${ex.name.toLowerCase()} for person ${i + 1}">+</button>
+        </span>
+        <span class="goal">of <input type="number" min="1" max="9999" id="goal-${i}-${ex.id}" aria-label="${ex.name} goal"></span>
+        <span class="bar"><i id="bar-${i}-${ex.id}"></i></span>
+      </div>`).join("")}`;
+    box.appendChild(card);
+    const nameIn = card.querySelector(`#name-${i}`);
+    nameIn.value = p.name;
+    nameIn.onchange = () => { p.name = nameIn.value.trim() || `Person ${i + 1}`; nameIn.value = p.name; save(); renderSets(); };
+    for (const ex of EXERCISES) {
+      const inp = card.querySelector(`#cnt-${i}-${ex.id}`);
+      // Reps counted while the box has focus are kept: the typed number is treated as the value at focus time.
+      let base = p.counts[ex.id];
+      inp.onfocus = () => { base = state.people[i].counts[ex.id]; };
+      inp.onkeydown = e => { if (e.key === "Enter") inp.blur(); };
+      inp.onchange = () => {
+        const q = state.people[i], raw = inp.value.trim();
+        const v = raw === "" ? NaN : Math.round(Number(raw)); // Number("") is 0, so a cleared box must not save
+        if (Number.isFinite(v) && v >= 0 && v <= 9999) {
+          const old = q.counts[ex.id];
+          q.counts[ex.id] = Math.min(9999, v + Math.max(0, old - base));
+          save();
+          if (ex.id === q.active && old < ex.target && q.counts[ex.id] >= ex.target) armAdvance(i, frameNow || performance.now());
+        }
+        base = q.counts[ex.id];
+        inp.value = q.counts[ex.id];
+        updatePeople(); renderExSeg();
+      };
+    }
+    for (const ex of EXERCISES) {
+      card.querySelector(`#minus-${i}-${ex.id}`).onclick = () => adjust(i, -1, ex.id);
+      card.querySelector(`#plus-${i}-${ex.id}`).onclick = () => adjust(i, 1, ex.id);
+      // The goal is the same for everyone: typing it here changes it in the Workout list too.
+      const goal = card.querySelector(`#goal-${i}-${ex.id}`);
+      goal.onkeydown = e => { if (e.key === "Enter") goal.blur(); };
+      goal.onchange = () => setGoal(ex.id, goal);
+    }
+  }
+  updatePeople();
+}
+
+function updatePeople() {
+  for (let i = 0; i < state.peopleCount; i++) {
+    const p = state.people[i];
+    for (const ex of EXERCISES) {
+      const n = p.counts[ex.id];
+      const row = $(`row-${i}-${ex.id}`), inp = $(`cnt-${i}-${ex.id}`);
+      if (!row) continue;
+      row.classList.toggle("on", p.active === ex.id);
+      row.classList.toggle("done", n >= ex.target);
+      if (document.activeElement !== inp) inp.value = n;
+      $(`bar-${i}-${ex.id}`).style.width = `${Math.min(100, n / ex.target * 100)}%`;
+      const goal = $(`goal-${i}-${ex.id}`);
+      if (document.activeElement !== goal) goal.value = ex.target;
+    }
+  }
+}
+
+function renderSets() {
+  const ul = $("sets");
+  ul.innerHTML = "";
+  const nth = {};
+  state.sets.forEach(s => {
+    const key = `${s.p}-${s.ex}`;
+    nth[key] = (nth[key] || 0) + 1;
+    const li = document.createElement("li");
+    const t = new Date(s.start).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    const who = document.createElement("span");
+    who.textContent = `${state.people[s.p].name} · ${exById(s.ex).name} set ${nth[key]} · ${t}`;
+    const b = document.createElement("b"); b.textContent = s.reps;
+    li.append(who, b);
+    ul.prepend(li);
+  });
+  $("setsEmpty").hidden = state.sets.length > 0;
+}
+
+function renderTune() {
+  const box = $("tune");
+  box.querySelectorAll(".r").forEach(n => n.remove());
+  for (const ex of EXERCISES) {
+    const name = document.createElement("label"); name.className = "r"; name.textContent = ex.name;
+    name.htmlFor = `sens-${ex.id}`;
+    const inp = document.createElement("input");
+    inp.className = "r"; inp.type = "range"; inp.min = 1; inp.max = 5; inp.step = 1;
+    inp.id = `sens-${ex.id}`; inp.value = state.sensitivity[ex.id] ?? 3;
+    inp.oninput = () => { state.sensitivity[ex.id] = Number(inp.value); save(); };
+    box.append(name, inp);
+  }
+}
+
+const PHASE_TEXT = {
+  nobody: "Not in frame", unclear: "Need full body", standing: "Standing",
+  down: "Going down", up: "Coming up", paused: "Paused", stopped: "Counting stopped", settling: "Hold still", teaching: "Learning",
+};
+const phaseLabel = t => t.phase === "unclear" && t.missing ? `Can't see ${t.missing}` : PHASE_TEXT[t.phase];
+function setPhase(i, ph, now, missing = null) {
+  const t = tracks[i];
+  if (t.phase === ph && t.missing === missing) return;
+  if (t.phase !== ph) { t.phaseSince = now; if (ph === "up" || ph === "down") t.warnArmed = true; }
+  t.phase = ph; t.missing = missing;
+  const el = $(`phase-${i}`);
+  if (el) { el.dataset.phase = ph; el.textContent = phaseLabel(t); }
+}
+
+function setStatus(text, kind = "") { const s = $("status"); s.textContent = text; s.className = kind; }
+
+// ---------- feedback ----------
+let audioCtx = null;
+let quiet = false; // set while replaying a recording
+function beep(freq = 880, ms = 70) {
+  if (quiet || !$("beep").checked) return;
+  try {
+    audioCtx ??= new AudioContext();
+    const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+    o.frequency.value = freq; g.gain.value = 0.15;
+    o.connect(g).connect(audioCtx.destination);
+    o.start(); o.stop(audioCtx.currentTime + ms / 1000);
+  } catch {}
+}
+function say(text) {
+  if (quiet || !$("voice").checked || !("speechSynthesis" in window)) return;
+  speechSynthesis.speak(new SpeechSynthesisUtterance(text));
+}
+
+// Spoken once when someone mid-set drops out of view, so their uncounted reps don't go unnoticed.
+function warnIfLost(i, now, ex) {
+  const t = tracks[i], p = state.people[i];
+  if (SELFTEST || paused || !t.warnArmed || (t.phase !== "unclear" && t.phase !== "nobody")) return;
+  if (now - t.phaseSince < 1500 || now - t.warnedAt < 20000) return;
+  if (Date.now() - p.lastRepAt > 30000 || p.counts[ex.id] >= ex.target) return;
+  say(t.phase === "unclear" ? `${p.name}, can't see your ${t.missing ?? "body"}` : `${p.name}, move back into your lane`);
+  t.warnedAt = now; t.warnArmed = false;
+}
+
+// ---------- counting ----------
+function logRep(i, exId, now) {
+  const p = state.people[i];
+  const last = [...state.sets].reverse().find(s => s.p === i);
+  if (last && last.ex === exId && now - p.lastRepAt < SET_GAP_MS) last.reps++;
+  else state.sets.push({ p: i, ex: exId, reps: 1, start: now });
+  p.lastRepAt = now;
+}
+
+function addRep(i, now) {
+  const p = state.people[i], ex = exById(p.active);
+  p.counts[ex.id]++;
+  logRep(i, ex.id, Date.now());
+  save(); updatePeople(); renderSets();
+
+  const n = p.counts[ex.id];
+  if (n === ex.target) {
+    beep(BEEP_PITCH[i] * 1.5, 250);
+    say(`${p.name} done.`);
+    armAdvance(i, now);
+    if (activePeople().every(q => EXERCISES.every(e => q.counts[e.id] >= e.target))) say("Everyone, all done");
+  } else {
+    beep(BEEP_PITCH[i]);
+    if (n % 10 === 0) say(n < ex.target ? `${p.name}, ${n}, ${ex.target - n} to go` : `${p.name}, ${n}`);
+    if (n > ex.target && tracks[i].advanceAt != null) tracks[i].advanceAt = now + ADVANCE_MS; // still going: wait
+  }
+}
+
+function adjust(i, delta, id = state.people[i].active) {
+  const p = state.people[i];
+  const n = Math.max(0, p.counts[id] + delta);
+  if (n === p.counts[id]) return;
+  p.counts[id] = n;
+  const last = [...state.sets].reverse().find(s => s.p === i && s.ex === id);
+  if (delta > 0) logRep(i, id, Date.now());
+  else if (last) {
+    last.reps--;
+    if (last.reps <= 0) state.sets.splice(state.sets.lastIndexOf(last), 1);
+  }
+  save(); updatePeople(); renderSets();
+  const tgt = exById(id).target;
+  if (id !== p.active) return; // only the movement being done can trigger a switch
+  if (delta > 0 && n === tgt) armAdvance(i, frameNow || performance.now());
+  if (delta < 0 && n < tgt) tracks[i].advanceAt = null;
+}
+
+const vis = p => p ? (p.visibility ?? 1) : 0;
+
+// Visibility-weighted midpoint of a left/right landmark pair, in frame-height units. null if neither is visible.
+function mid(lm, a, b) {
+  const pts = [lm[a], lm[b]].filter(p => vis(p) >= MIN_VIS);
+  if (!pts.length) return null;
+  const w = pts.reduce((t, p) => t + vis(p), 0);
+  const ar = canvas.width / canvas.height;
+  return { x: pts.reduce((t, p) => t + p.x * vis(p), 0) / w * ar, y: pts.reduce((t, p) => t + p.y * vis(p), 0) / w };
+}
+
+function bodyBox(lm) {
+  const ar = canvas.width / canvas.height;
+  let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity, n = 0;
+  for (const p of lm) {
+    if (vis(p) < MIN_VIS) continue;
+    n++; x0 = Math.min(x0, p.x * ar); x1 = Math.max(x1, p.x * ar); y0 = Math.min(y0, p.y); y1 = Math.max(y1, p.y);
+  }
+  if (n < 4) return null;
+  const w = x1 - x0, h = y1 - y0;
+  return { w, h, diag: Math.hypot(w, h) };
+}
+
+// Horizontal position on screen (0 = left edge, 1 = right edge), from the hips: they barely move sideways during
+// pushups or situps, unlike the shoulders. The video is mirrored, so flip x.
+function screenX(lm) {
+  let pts = [23, 24].map(i => lm[i]).filter(p => vis(p) >= MIN_VIS);
+  if (!pts.length) pts = [11, 12].map(i => lm[i]).filter(p => vis(p) >= MIN_VIS);
+  if (!pts.length) return null;
+  return 1 - pts.reduce((t, p) => t + p.x, 0) / pts.length;
+}
+
+// One pose per lane: the screen is split into equal vertical strips, left to right. If two poses land in one lane,
+// keep the one whose size best matches the person already tracked there (the biggest one before anyone is known).
+function byLane(poses) {
+  const n = state.peopleCount, out = Array(n).fill(null), best = Array(n).fill(-Infinity);
+  for (const lm of poses) {
+    const x = screenX(lm), box = bodyBox(lm);
+    if (x == null || !box) continue;
+    const lane = Math.min(n - 1, Math.max(0, Math.floor(x * n)));
+    const s = tracks[lane].scale;
+    const score = s ? -Math.abs(Math.log(box.diag / s)) : box.diag;
+    if (score > best[lane]) { best[lane] = score; out[lane] = lm; }
+  }
+  return out;
+}
+
+// Height signal (bigger = top of the rep), in frame-height units.
+// Pushups: how high the shoulders are. Situps: how far the shoulders are above the hips.
+function signal(t, ex, lm) {
+  if (ex.hl) { // taught movement
+    const v = ex.hl(lm), box = bodyBox(lm);
+    if (v == null || !box) return { ok: false, reason: "unclear", missing: ex.part };
+    t.scale = t.scale == null ? box.diag : t.scale * 0.97 + box.diag * 0.03;
+    return { ok: true, h: v };
+  }
+  const k = { sh: mid(lm, 11, 12), hip: mid(lm, 23, 24), knee: mid(lm, 25, 26), ankle: mid(lm, 27, 28), elbow: mid(lm, 13, 14), wrist: mid(lm, 15, 16) };
+  k.legs = k.knee || k.ankle;
+  // Each arm on its own (elbow and wrist both in view); null when neither arm is.
+  const arms = [[13, 15], [14, 16]].map(([e, w]) => ({ elbow: mid(lm, e, e), wrist: mid(lm, w, w) })).filter(a => a.elbow && a.wrist);
+  k.arms = arms.length ? arms : null;
+  const box = bodyBox(lm);
+  // Count only when the parts this movement needs are in view; floor work needs the legs too, so someone sitting
+  // at a desk with only head and shoulders on screen never counts.
+  const missing = ex.needs.find(n => !k[n]);
+  if (missing || !box) return { ok: false, reason: "unclear", missing: missing ? PART_NAME[missing] : "body" };
+  t.scale = t.scale == null ? box.diag : t.scale * 0.97 + box.diag * 0.03;
+  if (ex.getUp && box.h > 1.2 * box.w && k.hip.y - k.sh.y > 0.2 * box.h) return { ok: false, reason: "standing" };
+  return { ok: true, h: ex.h(k) };
+}
+
+function process(i, lm, now) {
+  const t = tracks[i], p = state.people[i];
+  checkAdvance(i, now); // before any early return, so a pending switch still happens while someone is out of view
+  if (teach && teach.lane === i) { t.lm = lm; setPhase(i, "teaching", now); return; } // watching, not counting
+  const ex = exById(p.active);
+
+  // Someone much bigger (closer to the camera, walking past) in this lane: ignore them for up to 1.5 s.
+  // If they stay, accept them as the new person here.
+  if (lm && t.scale) {
+    const box = bodyBox(lm);
+    if (box && box.diag > 1.6 * t.scale) {
+      t.bigSince ??= now;
+      if (now - t.bigSince < 1500) { t.lm = null; return; }
+      t.scale = box.diag; resetTracking(i);
+    }
+    t.bigSince = null;
+  }
+  t.lm = lm;
+
+  if (!lm) {
+    if (now - t.lastSeen > 1000) resetTracking(i, true);
+    setPhase(i, "nobody", now); warnIfLost(i, now, ex);
+    return;
+  }
+  const s = signal(t, ex, lm);
+  if (!s.ok) {
+    if (s.reason === "standing") {
+      // A rep counted only on the way up past the usual top was the start of standing up: take it back.
+      const d = t.det;
+      if (d.mode === "rising" && d.counted && !d.undone && !d.checked && d.top != null && d.countH > d.top) { adjust(i, -1); beep(330, 120); }
+      resetTracking(i); t.settling = true; t.settleRef = null;
+    }
+    else if (now - t.lastSeen > 1000) resetTracking(i, true);
+    setPhase(i, s.reason, now, s.missing ?? null); warnIfLost(i, now, ex);
+    return;
+  }
+  t.lastSeen = now;
+  // Time-based smoothing: same as alpha 0.5 at 30 fps, but reps keep their size when the frame rate drops.
+  const dt = t.lastT == null ? 1000 / 30 : Math.min(250, now - t.lastT);
+  t.lastT = now;
+  const a = Math.min(0.75, 1 - Math.exp(-dt / 48));
+  t.ema = t.ema == null ? s.h : t.ema * (1 - a) + s.h * a;
+  const mult = SENS_MULT[(state.sensitivity[ex.id] ?? 3) - 1];
+  const floor = ex.floorFrac * t.scale * mult;
+  t.trace.push({ t: now, h: t.ema, rep: false });
+  while (t.trace.length && now - t.trace[0].t > TRACE_MS) t.trace.shift();
+  if (paused) { setPhase(i, "paused", now); return; }
+  // After standing up, wait until the person has held still for 0.3 s, so pushup counting starts from their real
+  // plank (or lying) position, not from partway through getting down, which would set the usual top too high.
+  if (t.settling && ex.getUp) {
+    if (t.settleRef == null || Math.abs(t.ema - t.settleRef) > 0.5 * floor) { t.settleRef = t.ema; t.settleT = now; }
+    if (now - t.settleT < 300) { setPhase(i, "settling", now); return; }
+    t.settling = false; t.det = createDetector();
+  }
+  t.settling = false;
+  // Reps look bigger or smaller when someone moves closer or farther: then, and only then, re-learn the depth.
+  // (Holding still never resets it, so small shifts while holding plank can't pass for a rep.)
+  if (t.det.amp != null && t.repScale && Math.abs(t.scale / t.repScale - 1) > RESIZE) { rest(t.det); t.repScale = null; }
+
+  const modeBefore = t.det.mode;
+  const ev = feed(t.det, t.ema, floor, ex.getUp
+    ? { anchor: ex.anchor, getUpFirst: true, undoFirstAbove: 4 * floor, ampFrac: FULL_REP * mult }
+    : { anchor: ex.anchor, ampFrac: FULL_REP * mult });
+  if (SELFTEST && window.__trace && window.__traceLane === i && t.det.mode !== modeBefore) window.__trace.push({ i, mode: t.det.mode, h: +t.ema.toFixed(4), trough: t.det.trough, swingPeak: t.det.swingPeak, top: t.det.top, start: t.det.start, counted: t.det.counted, need: +t.det.need.toFixed(4), tol: +Math.max(1.5 * floor, 0.5 * (t.det.amp ?? 0)).toFixed(4), missed: t.det.missed, label: window.__label });
+  if (SELFTEST && ev && window.__trace) window.__trace.push({ i, ev, h: +t.ema.toFixed(4), trough: +(t.det.trough ?? 0).toFixed(4), top: t.det.top, start: t.det.start, lastPeak: t.det.lastPeak, amp: t.det.amp, need: +t.det.need.toFixed(4), floor: +floor.toFixed(4), label: window.__label });
+  if (ev) { diag?.events.push({ t: now, i, ev }); evSink?.push({ t: now, i, ev }); }
+  if (ev === "rep") { addRep(i, now); t.repScale = t.scale; t.flashUntil = now + 500; t.trace[t.trace.length - 1].rep = true; }
+  if (ev === "undo") { adjust(i, -1); beep(330, 120); const r = [...t.trace].reverse().find(q => q.rep); if (r) r.rep = false; }
+  setPhase(i, t.det.mode === "rising" ? "up" : "down", now);
+}
+
+function handleFrame(poses, now) {
+  frameNow = now;
+  if (diag && now >= diag.endAt) finishDiag();
+  if (diag) diag.frames.push({ t: now, p: poses.map(lm => lm.map(q => [r5(q.x), r5(q.y), r5(vis(q))])) });
+  const lanes = byLane(poses);
+  if (teach) { if (now >= teach.endAt) finishTeach(); else if (now >= teach.readyUntil) recordTeach(lanes[teach.lane]); }
+  for (let i = 0; i < state.peopleCount; i++) process(i, lanes[i], now);
+}
+
+// ---------- diagnostic recording and replay ----------
+// A recording keeps exactly what the pose tracker saw (every pose, every frame), the workout settings and counts,
+// and the reps counted live. Replaying it runs the same frames through the same counting code, so a rep that was
+// missed or counted wrongly on camera can be reproduced and fixed. Open the page with #replay to load one.
+let diag = null, evSink = null;
+const r5 = v => Math.round(v * 1e5) / 1e5;
+const DIAG_MS = 30000;
+const setDiagStatus = text => { $("diagStatus").textContent = text; };
+function snapshotSettings() {
+  return JSON.parse(JSON.stringify({ plan: state.plan, peopleCount: state.peopleCount, sensitivity: state.sensitivity, custom: state.custom || [],
+    people: state.people.map(p => ({ active: p.active, counts: p.counts })) }));
+}
+function startDiag(now, ms = DIAG_MS) {
+  diag = { endAt: now + ms, frames: [], events: [], settings: snapshotSettings() };
+}
+function finishDiag() {
+  const d = diag;
+  diag = null;
+  const rec = { app: "Workout Watcher", kind: "diagnostic", version: 1, recordedAt: new Date().toISOString(),
+    width: canvas.width, height: canvas.height, settings: d.settings, frames: d.frames, events: d.events };
+  if (!SELFTEST) {
+    const stamp = rec.recordedAt.slice(0, 16).replace(/[-:T]/g, "");
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([JSON.stringify(rec)], { type: "application/json" }));
+    a.download = `workout-watcher-diagnostic-${stamp}.json`;
+    a.click();
+    setDiagStatus(`Saved ${a.download} (${rec.frames.length} frames). Note how many reps each person really did, and share the file with whoever is tuning the counter.`);
+  }
+  return rec;
+}
+// Runs a recording on a copy of the workout and puts everything back afterwards. Returns reps per lane (replayed and
+// live) and the replayed rep/undo events.
+function replayDiag(rec) {
+  const saved = { state, tracks, frameNow, paused, teach, diag, w: canvas.width, h: canvas.height };
+  const events = [];
+  try {
+    diag = null; teach = null; paused = false; quiet = true; evSink = events;
+    (rec.settings.custom || []).forEach(c => { if (!MOVES[c.id]) registerCustom(c); });
+    const st = JSON.parse(JSON.stringify(state));
+    st.plan = rec.settings.plan; st.peopleCount = rec.settings.peopleCount;
+    st.sensitivity = { ...st.sensitivity, ...rec.settings.sensitivity };
+    st.people.forEach((p, i) => { const q = rec.settings.people[i]; if (q) { p.active = q.active; p.counts = { ...p.counts, ...q.counts }; } });
+    state = st; buildPlan();
+    tracks = Array.from({ length: MAX_PEOPLE }, newTrack);
+    canvas.width = rec.width; canvas.height = rec.height;
+    for (const fr of rec.frames) handleFrame(fr.p.map(lm => lm.map(([x, y, v]) => ({ x, y, visibility: v }))), fr.t);
+  } finally {
+    ({ state, tracks, frameNow, paused, teach, diag } = saved);
+    canvas.width = saved.w; canvas.height = saved.h;
+    quiet = false; evSink = null;
+    buildPlan(); renderExSeg(); renderPeople(); renderSets();
+  }
+  const tally = evs => evs.reduce((r, e) => { r[e.i] += e.ev === "rep" ? 1 : -1; return r; }, Array(MAX_PEOPLE).fill(0));
+  return { reps: tally(events), liveReps: tally(rec.events), events };
+}
+
+// ---------- teaching a movement ----------
+// The person in one lane does a few reps; every body point is recorded along x and y, and the one that moves
+// furthest (relative to body size) becomes the new movement's signal.
+let teach = null; // { name, lane, readyUntil, endAt, rows: [{ scale, v: [[x, y] | null per TEACH_POINTS] }] }
+const setTeachStatus = text => { $("teachStatus").textContent = text; };
+function startTeach(name, lane, now) {
+  teach = { name: name.trim() || "My movement", lane, readyUntil: now + TEACH_READY_MS, endAt: now + TEACH_READY_MS + TEACH_MS, rows: [] };
+  setTeachStatus(`Get ready, ${state.people[lane].name}: do about 5 reps of ${teach.name} when the countdown ends.`);
+}
+function recordTeach(lm) {
+  const box = lm && bodyBox(lm);
+  if (!box) return;
+  teach.rows.push({ scale: box.diag, v: TEACH_POINTS.map(pt => { const m = mid(lm, pt.idx[0], pt.idx[1] ?? pt.idx[0]); return m && [m.x, m.y]; }) });
+}
+function finishTeach() {
+  const { name, lane, rows } = teach;
+  teach = null;
+  const quant = (vals, f) => vals[Math.floor(f * (vals.length - 1))];
+  const scale = quant(rows.map(r => r.scale).sort((a, b) => a - b), 0.5);
+  let best = null;
+  TEACH_POINTS.forEach((pt, j) => ["x", "y"].forEach((axis, ai) => {
+    const vals = rows.map(r => r.v[j]?.[ai]).filter(v => v != null).sort((a, b) => a - b);
+    if (vals.length < 10 || vals.length < 0.7 * rows.length) return;
+    const lo = quant(vals, 0.05), hi = quant(vals, 0.95), med = quant(vals, 0.5), norm = (hi - lo) / scale;
+    // The end the point rests at is where it spends most of its time; a rep rises away from it.
+    if (!best || norm > best.norm) best = { pt, axis, norm, sign: med - lo <= hi - med ? 1 : -1 };
+  }));
+  if (!best || best.norm < 0.08) {
+    setTeachStatus(`Couldn't see a clear movement for "${name}". Keep your whole body in your lane and try again.`);
+    return;
+  }
+  const c = { id: `custom-${Date.now().toString(36)}`, name, idx: best.pt.idx, axis: best.axis, sign: best.sign, part: best.pt.name,
+    floorFrac: Math.min(0.15, Math.max(0.03, 0.3 * best.norm)) };
+  registerCustom(c);
+  (state.custom ??= []).push(c);
+  state.plan.push({ id: c.id, on: true, target: MOVES[c.id].target });
+  state.people.forEach(p => { p.counts[c.id] ??= 0; });
+  state.sensitivity[c.id] = 3;
+  buildPlan();
+  state.people[lane].active = c.id; resetTracking(lane);
+  save(); renderMoves(); renderExSeg(); renderPeople(); renderTune();
+  setTeachStatus(`Learned "${name}": it follows the ${best.pt.name} moving ${best.axis === "y" ? "up and down" : "side to side"}. It's ticked with a goal of ${MOVES[c.id].target}.`);
+}
+function removeCustom(id) {
+  state.custom = state.custom.filter(c => c.id !== id);
+  state.plan = state.plan.filter(x => x.id !== id);
+  delete MOVES[id]; MOVE_IDS = Object.keys(MOVES);
+  planChanged(); renderMoves();
+}
+
+// ---------- drawing ----------
+function drawTrace(now) {
+  const c = $("trace"), g = c.getContext("2d");
+  const W = c.width, H = c.height;
+  g.clearRect(0, 0, W, H);
+  const t0 = now - TRACE_MS, X = t => (t - t0) / TRACE_MS * W;
+  for (let i = 0; i < state.peopleCount; i++) {
+    const pts = tracks[i].trace;
+    if (pts.length < 2) continue;
+    // Each person is scaled to their own range so all three lines read clearly.
+    let lo = Infinity, hi = -Infinity;
+    for (const p of pts) { lo = Math.min(lo, p.h); hi = Math.max(hi, p.h); }
+    const span = Math.max(hi - lo, (tracks[i].det.need || 0.05) * 1.5);
+    lo = (lo + hi) / 2 - span / 2; hi = lo + span;
+    const Y = h => H - 12 - (h - lo) / (hi - lo) * (H - 24);
+    g.strokeStyle = COLOR.person[i]; g.lineWidth = 3;
+    g.beginPath(); pts.forEach((p, k) => k ? g.lineTo(X(p.t), Y(p.h)) : g.moveTo(X(p.t), Y(p.h))); g.stroke();
+    g.fillStyle = COLOR.person[i];
+    for (const p of pts) if (p.rep) { g.beginPath(); g.arc(X(p.t), Y(p.h), 8, 0, Math.PI * 2); g.fill(); }
+  }
+}
+
+function draw() {
+  const W = canvas.width, H = canvas.height, n = state.peopleCount, big = !!document.fullscreenElement;
+  ctx.save(); ctx.translate(W, 0); ctx.scale(-1, 1); ctx.drawImage(video, 0, 0, W, H); ctx.restore();
+  const P = p => [(1 - p.x) * W, p.y * H];
+  const font = (w, px) => `${w} ${Math.round(px)}px Barlow Condensed, sans-serif`;
+  // Set the font, shrunk if needed so `text` fits in maxW.
+  const fit = (w, px, text, maxW) => { ctx.font = font(w, px); const tw = ctx.measureText(text).width; if (tw > maxW) ctx.font = font(w, px * maxW / tw); };
+
+  // Lane dividers.
+  ctx.strokeStyle = "rgba(255,255,255,.6)"; ctx.lineWidth = Math.max(2, W / 400); ctx.setLineDash([16, 12]);
+  for (let k = 1; k < n; k++) { ctx.beginPath(); ctx.moveTo(k * W / n, 0); ctx.lineTo(k * W / n, H); ctx.stroke(); }
+  ctx.setLineDash([]);
+
+  for (let i = 0; i < n; i++) {
+    const t = tracks[i], color = COLOR.person[i], lm = t.lm, p = state.people[i], ex = exById(p.active);
+    const laneW = W / n, x0 = i * laneW, pad = W / 80;
+
+    // A lane that can't count anyone turns purple (red if counting stopped) and says why, readable from the floor.
+    if (trackingDead || ((t.phase === "nobody" || t.phase === "unclear") && frameNow - t.phaseSince > 1000)) {
+      ctx.fillStyle = trackingDead ? "rgba(255,80,60,.30)" : "rgba(201,160,255,.18)"; ctx.fillRect(x0, 0, laneW, H);
+      const l1 = trackingDead ? "COUNTING STOPPED" : t.phase === "nobody" ? "GET IN THIS LANE" : `CAN'T SEE ${(t.missing ?? "body").toUpperCase()}`;
+      ctx.textAlign = "center"; ctx.lineWidth = Math.max(4, H / 180); ctx.strokeStyle = "rgba(0,0,0,.75)"; ctx.fillStyle = "#fff";
+      fit(700, H / 14, l1, laneW - 2 * pad); ctx.strokeText(l1, x0 + laneW / 2, H * 0.6); ctx.fillText(l1, x0 + laneW / 2, H * 0.6);
+      if (trackingDead || t.phase === "unclear") {
+        const l2 = trackingDead ? "RELOAD THE PAGE" : "MOVE SO YOUR WHOLE BODY IS IN VIEW";
+        fit(600, H / 20, l2, laneW - 2 * pad); ctx.strokeText(l2, x0 + laneW / 2, H * 0.6 + H / 14); ctx.fillText(l2, x0 + laneW / 2, H * 0.6 + H / 14);
+      }
+      ctx.textAlign = "left";
+    }
+
+    if (lm) {
+      ctx.lineWidth = Math.max(3, W / 360); ctx.strokeStyle = color;
+      for (const [a, b] of BONES) {
+        if (vis(lm[a]) < MIN_VIS || vis(lm[b]) < MIN_VIS) continue;
+        const [x1, y1] = P(lm[a]), [x2, y2] = P(lm[b]);
+        ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+      }
+      ctx.fillStyle = "#fff";
+      for (const k of new Set(BONES.flat())) {
+        if (vis(lm[k]) < MIN_VIS) continue;
+        const [x, y] = P(lm[k]); ctx.beginPath(); ctx.arc(x, y, Math.max(3, W / 300), 0, Math.PI * 2); ctx.fill();
+      }
+    }
+
+    // Diagnostic recording indicator (top right of the first lane's neighbour edge).
+    if (diag && i === n - 1) {
+      const secs = Math.ceil((diag.endAt - frameNow) / 1000), label = `● DIAGNOSTIC ${secs}s`;
+      ctx.fillStyle = "#ff5040"; ctx.textAlign = "right"; fit(700, H / 26, label, laneW - 2 * pad); ctx.fillText(label, W - pad, H - pad); ctx.textAlign = "left";
+    }
+    // Teaching countdown in this lane.
+    if (teach && teach.lane === i) {
+      const ready = frameNow < teach.readyUntil;
+      const secs = Math.ceil(((ready ? teach.readyUntil : teach.endAt) - frameNow) / 1000);
+      const l1 = ready ? `GET READY · ${secs}` : `DO 5 REPS NOW · ${secs}s`, l2 = teach.name.toUpperCase();
+      ctx.fillStyle = "rgba(255,173,31,.18)"; ctx.fillRect(x0, 0, laneW, H);
+      ctx.textAlign = "center"; ctx.lineWidth = Math.max(4, H / 180); ctx.strokeStyle = "rgba(0,0,0,.75)"; ctx.fillStyle = "#fff";
+      fit(700, H / 12, l1, laneW - 2 * pad); ctx.strokeText(l1, x0 + laneW / 2, H * 0.6); ctx.fillText(l1, x0 + laneW / 2, H * 0.6);
+      fit(600, H / 20, l2, laneW - 2 * pad); ctx.strokeText(l2, x0 + laneW / 2, H * 0.6 + H / 14); ctx.fillText(l2, x0 + laneW / 2, H * 0.6 + H / 14);
+      ctx.textAlign = "left";
+    }
+
+    // HUD per lane, burned into the frame so recordings show every count. Bigger in fullscreen.
+    const cnt = p.counts[ex.id], done = cnt >= ex.target;
+    const boxW = big ? laneW - 2 * pad : Math.min(laneW - 2 * pad, W / 3.6), inner = boxW - pad * 3;
+    const boxH = big ? H / 2.6 : H / 4.5;
+    const sz = big ? { name: H / 22, num: H / 5, left: H / 16, gap: H / 14, phase: H / 14 } : { name: H / 30, num: H / 8, left: H / 22, gap: H / 20, phase: H / 22 };
+    ctx.fillStyle = "rgba(10,12,16,.72)"; ctx.fillRect(x0 + pad, pad, boxW, boxH);
+    ctx.fillStyle = color; ctx.fillRect(x0 + pad, pad, 6, boxH);
+    const tx = x0 + pad * 2.2;
+    let y = pad + sz.name * 1.1;
+    const label = `${p.name.toUpperCase()} · ${ex.name.toUpperCase()}`;
+    ctx.fillStyle = "#cfd3dc"; fit(600, sz.name, label, inner); ctx.fillText(label, tx, y);
+    y += sz.num;
+    ctx.fillStyle = done ? COLOR.up : color; fit(700, sz.num, String(cnt), inner); ctx.fillText(String(cnt), tx, y);
+    y += sz.gap;
+    const left = done ? "DONE" : `${ex.target - cnt} LEFT`;
+    ctx.fillStyle = "#fff"; fit(600, sz.left, left, inner); ctx.fillText(left, tx, y);
+    const ph = phaseLabel(t).toUpperCase();
+    ctx.fillStyle = t.phase === "unclear" || t.phase === "nobody" || t.phase === "standing" ? "#e2ccff" : "#fff";
+    fit(700, sz.phase, ph, boxW); ctx.fillText(ph, x0 + pad * 1.2, pad + boxH + sz.phase);
+    if (frameNow < t.flashUntil) {
+      ctx.fillStyle = COLOR.up; ctx.font = font(700, H / 7);
+      ctx.textAlign = "right"; ctx.fillText("+1", x0 + laneW - pad, big ? H * 0.55 : H / 3); ctx.textAlign = "left";
+    }
+  }
+}
+
+function updateClock() {
+  if (!startedAt) return;
+  const s = Math.floor((Date.now() - startedAt) / 1000);
+  $("clock").innerHTML = `Elapsed <b>${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}</b>`;
+}
+
+// ---------- detection loop ----------
+let fileset = null, usedDelegate = "";
+async function createLandmarker(delegates = ["GPU", "CPU"]) {
+  fileset ??= await FilesetResolver.forVisionTasks(WASM);
+  for (const delegate of delegates) {
+    try {
+      const lmk = await PoseLandmarker.createFromOptions(fileset, {
+        baseOptions: { modelAssetPath: MODEL, delegate },
+        runningMode: "VIDEO", numPoses: MAX_PEOPLE,
+        minPoseDetectionConfidence: 0.5, minPosePresenceConfidence: 0.5, minTrackingConfidence: 0.5,
+      });
+      usedDelegate = delegate;
+      return lmk;
+    } catch (e) { if (delegate === delegates[delegates.length - 1]) throw e; }
+  }
+}
+
+let lastClock = 0, failures = 0, recovering = false, trackingDead = false;
+let detCount = 0, detWindowStart = 0, lowFpsSince = null, lowFpsWarned = false, lastFrameAt = 0;
+function loop() {
+  if (!running) return;
+  requestAnimationFrame(loop); // scheduled first, so an error below can never stop the loop
+  if (video.readyState < 2) return;
+  const now = performance.now();
+  if (!trackingDead && landmarker && !recovering && video.currentTime !== lastVideoTime) {
+    lastFrameAt = now;
+    lastVideoTime = video.currentTime;
+    try {
+      const res = landmarker.detectForVideo(video, now);
+      detCount++;
+      handleFrame(res.landmarks || [], now);
+      if (failures) { failures = 0; setStatus("Tracking", "ok"); }
+    } catch (e) {
+      if (++failures <= 3) console.error("frame error", e);
+      setStatus("Tracking error, retrying", "err");
+      if (failures === 3) recover();
+    }
+    try { drawTrace(now); } catch (e) { console.error(e); }
+  }
+  if (landmarker && !recovering && now - detWindowStart >= 1000) {
+    const fps = Math.round(detCount * 1000 / (now - detWindowStart || 1000));
+    detCount = 0; detWindowStart = now;
+    $("detfps").textContent = `Detection ${fps} fps · ${usedDelegate}`;
+    if (fps < 15) {
+      lowFpsSince ??= now;
+      if (!lowFpsWarned && now - lowFpsSince > 5000) {
+        lowFpsWarned = true;
+        setStatus("Tracking, but detection is slow (under 15 fps): shallow reps may be missed. Stop recording, close other apps, or raise Sensitivity.", "err");
+      }
+    } else lowFpsSince = null;
+  }
+  // A camera that stops delivering frames without firing any event.
+  if (!trackingDead && !recovering && landmarker && lastFrameAt && now - lastFrameAt > 3000) stopTracking("The camera stopped sending video. Reconnect it and reload the page.");
+  try { draw(); } catch (e) { console.error(e); }
+  if (now - lastClock > 500) { lastClock = now; updateClock(); }
+}
+
+// After repeated frame errors, rebuild the pose model on the CPU and carry on.
+async function recover() {
+  recovering = true;
+  say("Tracking problem. Restarting.");
+  try {
+    try { landmarker?.close(); } catch {}
+    landmarker = null;
+    landmarker = await createLandmarker(["CPU"]);
+    lastVideoTime = -1; resetTracking(); failures = 0;
+    setStatus("Tracking (restarted on CPU)", "ok"); say("Tracking restarted");
+  } catch (e) {
+    stopTracking(`Tracking stopped: ${e.message ?? e}. Reload the page.`);
+  } finally {
+    recovering = false;
+    detCount = 0; detWindowStart = lastFrameAt = performance.now(); lowFpsSince = null; lowFpsWarned = false;
+  }
+}
+// Counting can't continue (model or camera gone): say so on every lane, big enough to see from the floor.
+function stopTracking(msg) {
+  if (trackingDead) return;
+  trackingDead = true;
+  tracks.forEach(t => { t.lm = null; t.advanceAt = null; });
+  for (let i = 0; i < state.peopleCount; i++) setPhase(i, "stopped", frameNow);
+  setStatus(msg, "err"); $("detfps").textContent = "Detection stopped";
+  say("Counting stopped. " + msg);
+}
+window.addEventListener("unhandledrejection", e => { console.error(e.reason); setStatus(`Error: ${e.reason?.message ?? e.reason}`, "err"); });
+
+// ---------- camera, screen and sound ----------
+let wakeLock = null;
+async function lockScreen() {
+  if (!("wakeLock" in navigator)) { setStatus("Tracking. This browser can't keep the screen awake: plug in power and turn off display sleep.", "err"); return; }
+  try {
+    wakeLock = await navigator.wakeLock.request("screen");
+    console.info("wake lock acquired");
+    wakeLock.addEventListener("release", () => { console.info("wake lock released"); wakeLock = null; });
+  } catch (e) {
+    setStatus(`Tracking. The screen may sleep (${e.name}): turn off display sleep or run caffeinate -d.`, "err");
+  }
+}
+// Chrome drops the wake lock whenever the tab is hidden, and a hidden tab stops counting.
+document.addEventListener("visibilitychange", () => {
+  if (!running) return;
+  if (document.visibilityState === "visible") { if (!wakeLock) lockScreen(); }
+  else say("Rep counter hidden. Counting stopped.");
+});
+
+async function startCamera() {
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 1920 }, height: { ideal: 1080 }, facingMode: "user" }, audio: false });
+  } catch (e) {
+    const msg = e.name === "NotReadableError" ? "The camera is in use by another app. Close it, then reload."
+      : e.name === "NotFoundError" || e.name === "OverconstrainedError" ? "No camera found. Connect one, then reload."
+      : `Camera blocked (${e.name}). Allow camera access for this page in the browser and in macOS Privacy settings, then reload.`;
+    setStatus(msg, "err"); $("placeholderMsg").textContent = msg;
+    return;
+  }
+  video.srcObject = stream;
+  const track = stream.getVideoTracks()[0];
+  track?.addEventListener("ended", () => { if (running) stopTracking("The camera disconnected. Reconnect it and reload the page."); });
+  await video.play();
+  canvas.width = video.videoWidth || 1280; canvas.height = video.videoHeight || 720;
+  $("placeholder").hidden = true;
+  $("pause").disabled = false; $("rec").disabled = false;
+  startedAt = Date.now(); running = true;
+  setStatus("Tracking", "ok");
+  await lockScreen();
+  // Browsers block sound until the page is clicked once; say so on screen, since nobody on the floor will notice.
+  if (!navigator.userActivation?.hasBeenActive) { $("soundGate").hidden = false; setStatus("Tracking. Sound is off until you click the page once.", "err"); }
+  requestAnimationFrame(loop);
+}
+
+// ---------- recording ----------
+let recorder = null;
+function toggleRecording() {
+  const btn = $("rec");
+  if (recorder && recorder.state === "recording") { btn.disabled = true; btn.textContent = "Saving…"; recorder.stop(); return; }
+  // H.264 first: Chrome encodes it in hardware on a Mac, leaving the CPU for pose detection.
+  const types = ["video/mp4;codecs=avc1", "video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm", "video/mp4"];
+  const mimeType = types.find(t => window.MediaRecorder && MediaRecorder.isTypeSupported(t));
+  if (!mimeType) { setStatus("This browser can't record video. Try Chrome.", "err"); return; }
+  const rec = recorder = new MediaRecorder(canvas.captureStream(30), { mimeType, videoBitsPerSecond: 4_000_000 });
+  const parts = [];
+  const started = new Date();
+  rec.ondataavailable = e => { if (e.data.size) parts.push(e.data); };
+  rec.onstop = () => {
+    const blob = new Blob(parts, { type: rec.mimeType });
+    parts.length = 0;
+    const ext = rec.mimeType.includes("mp4") ? "mp4" : "webm";
+    const pad2 = v => String(v).padStart(2, "0");
+    const stamp = `${started.getFullYear()}-${pad2(started.getMonth() + 1)}-${pad2(started.getDate())}-${pad2(started.getHours())}${pad2(started.getMinutes())}`;
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob); a.download = `workout-${stamp}.${ext}`;
+    a.textContent = `Save ${a.download} (${(blob.size / 1e6).toFixed(1)} MB)`;
+    const box = $("recordings");
+    box.querySelector(".empty")?.remove();
+    const p = document.createElement("p"); p.style.margin = "0"; p.appendChild(a); box.prepend(p);
+    a.click();
+    btn.setAttribute("aria-pressed", "false"); btn.textContent = "Record video"; btn.disabled = false;
+  };
+  recorder.start(1000);
+  btn.setAttribute("aria-pressed", "true"); btn.textContent = "Stop recording";
+}
+
+// ---------- wiring ----------
+// Sound can only start after a click or key press on the page; unlock it on the first one.
+const unlockAudio = () => {
+  try { audioCtx ??= new AudioContext(); audioCtx.resume(); } catch {}
+  if (!$("soundGate").hidden) {
+    $("soundGate").hidden = true;
+    if (running) setStatus("Tracking", "ok");
+    beep(660, 120); say("Sound on");
+  }
+};
+document.addEventListener("pointerdown", unlockAudio);
+document.addEventListener("keydown", unlockAudio);
+const toggleBig = () => document.fullscreenElement ? document.exitFullscreen() : $("stage").requestFullscreen().catch(() => {});
+$("big").onclick = toggleBig;
+document.addEventListener("keydown", e => {
+  const typing = e.target.isContentEditable || e.target.tagName === "TEXTAREA" || (e.target.tagName === "INPUT" && /^(text|number|search)$/.test(e.target.type));
+  if ((e.key === "f" || e.key === "F") && !e.metaKey && !e.ctrlKey && !e.altKey && !typing) { e.preventDefault(); toggleBig(); }
+});
+$("pause").onclick = () => {
+  paused = !paused; resetTracking();
+  $("pause").textContent = paused ? "Resume counting" : "Pause counting";
+};
+$("rec").onclick = toggleRecording;
+// Spoken callouts, beeps and auto-advance are remembered between visits; speech starts off.
+for (const key of ["voice", "beep", "autoNext"]) {
+  $(key).checked = !!state.prefs[key];
+  $(key).addEventListener("change", () => {
+    state.prefs[key] = $(key).checked; save();
+    if (key === "voice" && !$(key).checked && "speechSynthesis" in window) speechSynthesis.cancel();
+  });
+}
+$("autoNext").onchange = () => { if ($("autoNext").checked) rearmFinished(); else tracks.forEach(t => t.advanceAt = null); };
+let resetArmed = null;
+$("reset").onclick = () => {
+  const b = $("reset");
+  if (!resetArmed) {
+    b.textContent = "Tap again to reset";
+    resetArmed = setTimeout(() => { resetArmed = null; b.textContent = "Reset all"; }, 3000);
+    return;
+  }
+  clearTimeout(resetArmed); resetArmed = null; b.textContent = "Reset all";
+  const keep = { sensitivity: state.sensitivity, peopleCount: state.peopleCount, names: state.people.map(p => p.name), plan: state.plan, prefs: state.prefs };
+  state = blankState();
+  state.sensitivity = keep.sensitivity; state.peopleCount = keep.peopleCount; state.plan = keep.plan; state.prefs = keep.prefs;
+  buildPlan();
+  state.people.forEach((p, i) => { p.name = keep.names[i]; });
+  resetTracking(); tracks.forEach(t => t.advanceAt = null);
+  save(); renderExSeg(); renderPeople(); renderSets();
+};
+
+renderPeopleSeg(); renderMoves(); renderExSeg(); renderPeople(); renderSets(); renderTune();
+$("teachBtn").onclick = () => {
+  if (teach) { setTeachStatus("Already learning a movement. Wait for the countdown to finish."); return; }
+  if (!running) { setTeachStatus("Start the camera first: teaching watches someone do the movement."); return; }
+  startTeach($("teachName").value, Number($("teachWho").value), frameNow || performance.now());
+  $("teachName").value = "";
+};
+if (!SELFTEST && !REPLAY) rearmFinished();
+$("diagBtn").onclick = () => {
+  if (diag) { setDiagStatus("Already recording."); return; }
+  if (!running) { setDiagStatus("Start the camera first."); return; }
+  startDiag(frameNow || performance.now());
+  setDiagStatus("Recording for 30 s. Do the reps that get counted wrongly.");
+};
+if (REPLAY) {
+  window.__replayDiag = replayDiag; // for inspecting a recording from the console
+  $("placeholderMsg").textContent = "Replay a diagnostic recording: choose the .json file saved with \u201cRecord 30 s for diagnosis\u201d.";
+  const inp = document.createElement("input");
+  inp.type = "file"; inp.accept = ".json,application/json"; inp.id = "replayFile";
+  $("placeholder").append(inp);
+  inp.onchange = async () => {
+    try {
+      const rec = JSON.parse(await inp.files[0].text());
+      if (rec.kind !== "diagnostic") throw new Error("not a diagnostic recording");
+      const r = replayDiag(rec);
+      window.__replay = r;
+      const lines = Array.from({ length: rec.settings.peopleCount }, (_, i) => `${state.people[i].name}: counted live ${r.liveReps[i]}, replayed ${r.reps[i]}`);
+      $("placeholderMsg").textContent = `${rec.frames.length} frames (${((rec.frames.at(-1)?.t - rec.frames[0]?.t) / 1000 || 0).toFixed(1)} s). ${lines.join(" · ")}`;
+      setStatus("Replay finished", "ok");
+    } catch (e) { setStatus(`Couldn't replay that file: ${e.message}`, "err"); }
+  };
+}
+
+if (!SELFTEST && !REPLAY && (!window.isSecureContext || !navigator.mediaDevices)) {
+  setStatus("This browser can't use the camera here. Open the page over https (or http://localhost) in Chrome, Safari, Edge or Firefox.", "err");
+}
+
+if (!SELFTEST && !REPLAY) {
+  try {
+    landmarker = await createLandmarker();
+  } catch (e) {
+    console.error(e);
+    setStatus("Couldn't load the pose model. Check the internet connection and reload.", "err");
+    $("placeholderMsg").textContent = "Couldn't load the pose model. Check the internet connection and reload.";
+  }
+}
+
+// ---------- self-test (open with #selftest, or #selftest&fps=15) ----------
+// Three people side by side, each in their own lane, doing reps at their own pace at the same time. Synthetic
+// side-view poses run through the same handleFrame() the camera uses; checks each rep adds exactly one to the
+// right person.
+let check0 = null;
+function runSelfTest() {
+  const FPS = Number(location.hash.match(/fps=(\d+)/)?.[1] || 30);
+  const SENS = Number(location.hash.match(/sens=([1-5])/)?.[1] || 3); // #selftest&fps=15&sens=4
+  MOVE_IDS.forEach(id => state.sensitivity[id] = SENS);
+  check0 = ["Spoken callouts start off", false, blankState().prefs.voice];
+  state.plan.forEach(x => { x.on = x.id === "pushups" || x.id === "situps"; x.target = x.id === "pushups" ? 300 : x.id === "situps" ? 100 : MOVES[x.id].target; });
+  state.peopleCount = 3; buildPlan(); renderPeopleSeg(); renderMoves(); renderExSeg(); renderPeople();
+  const sec = s => Math.round(s * FPS);
+  let seed = 11;
+  const rand = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  const noise = sd => (rand() + rand() + rand() - 1.5) * sd * 2;
+  const ar = canvas.width / canvas.height;
+  // Pose points are in screen frame-height units around (1.0, 1.0); each person is shrunk and moved into a lane.
+  // cx overrides the lane center (screen x in frame-height units).
+  const place = (pts, lane, s, yBase, cx = (lane + 0.5) / 3 * ar) =>
+    Object.fromEntries(Object.entries(pts).map(([k, v]) => [k, Array.isArray(v) ? [cx + (v[0] - 1.0) * s, yBase + (v[1] - 1.0) * s] : v]));
+  const toLm = (pts, legVis = 0.9, hipVis = 0.9) => {
+    const put = ([x, y], v = 0.9) => ({ x: 1 - (x + noise(0.003)) / ar, y: y + noise(0.003), visibility: v }); // mirrored like the camera
+    const lm = Array.from({ length: 33 }, () => put(pts.head));
+    lm[11] = put(pts.shoulder); lm[12] = put([pts.shoulder[0] + 0.005, pts.shoulder[1]], 0.6);
+    lm[13] = put(pts.elbow); lm[15] = put(pts.wrist);
+    // The other arm mirrors this one unless the pose gives it its own position (alternating curls, one-arm press).
+    const rv = pts.armRVis ?? (pts.elbowR ? 0.9 : 0.5);
+    lm[14] = put(pts.elbowR ?? pts.elbow, rv); lm[16] = put(pts.wristR ?? pts.wrist, rv);
+    lm[23] = put(pts.hip, hipVis); lm[24] = put(pts.hip, hipVis * 0.7);
+    lm[25] = put(pts.knee, legVis); lm[26] = put(pts.knee, legVis * 0.7); lm[27] = put(pts.ankle, legVis); lm[28] = put(pts.ankle, legVis * 0.7);
+    return lm;
+  };
+  const lerp = (a, b, k) => [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k];
+  const mix = (A, B, k) => Object.fromEntries(Object.keys(A).map(n => [n, lerp(A[n], B[n], k)]));
+  const pushup = (p, d) => ({
+    head: [0.45, 0.95 + d * p], shoulder: [0.62, 1.0 + d * p], elbow: [0.6 + 0.06 * p, 1.13 + 0.4 * d * p], wrist: [0.6, 1.3],
+    hip: [1.05, 1.03 + 0.7 * d * p], knee: [1.32, 1.1 + 0.35 * d * p], ankle: [1.58, 1.2],
+  });
+  const standing = { head: [1.0, 0.12], shoulder: [1.0, 0.3], elbow: [1.0, 0.48], wrist: [1.0, 0.62], hip: [1.0, 0.6], knee: [1.0, 0.8], ankle: [1.0, 0.98] };
+  const situp = a => {
+    const hip = [1.0, 1.15], L = 0.45;
+    const shoulder = [hip[0] - L * Math.cos(a), hip[1] - L * Math.sin(a)];
+    return { head: [shoulder[0] - 0.12 * Math.cos(a), shoulder[1] - 0.12 * Math.sin(a)], shoulder, elbow: lerp(shoulder, hip, 0.4), wrist: lerp(shoulder, hip, 0.6), hip, knee: [1.25, 0.95], ankle: [1.48, 1.15] };
+  };
+  // Standing movements: hips drop toward the knees; arms swing overhead; forearms curl up.
+  const squat = p => ({ ...standing, head: [1.0, 0.12 + 0.2 * p], shoulder: [1.0, 0.3 + 0.2 * p], elbow: [1.08, 0.48 + 0.15 * p], wrist: [1.15, 0.5 + 0.15 * p], hip: [0.95, 0.6 + 0.17 * p], knee: [1.08, 0.8] });
+  const jack = p => ({ ...standing, elbow: [1.0 + 0.1 * Math.sin(Math.PI * p), 0.48 - 0.4 * p], wrist: [1.0, 0.62 - 0.62 * p], ankle: [1.0 + 0.1 * p, 0.98] });
+  const curl = p => ({ ...standing, elbow: [1.0, 0.45], wrist: [1.0 + 0.1 * Math.sin(Math.PI * p), 0.62 - 0.3 * p] });
+  const curlWrist = p => [1.0 + 0.1 * Math.sin(Math.PI * p), 0.62 - 0.3 * p];
+  // One arm at a time: even reps the left arm, odd reps the right.
+  const altCurl = s => ({ ...standing, elbow: [1.0, 0.45], elbowR: [1.02, 0.45], wrist: curlWrist(s.r % 2 === 0 ? s.p : 0), wristR: curlWrist(s.r % 2 === 1 ? s.p : 0) });
+  const lunge = p => ({ ...standing, head: [1.0, 0.12 + 0.15 * p], shoulder: [1.0, 0.3 + 0.15 * p], elbow: [1.0, 0.48 + 0.15 * p], wrist: [1.0, 0.62 + 0.15 * p], hip: [1.0, 0.6 + 0.15 * p], knee: [1.0 + 0.1 * p, 0.8 + 0.05 * p] });
+  const press = p => ({ ...standing, elbow: [1.08, 0.38 - 0.2 * p], wrist: [1.05, 0.28 - 0.25 * p] });
+  const situpAngle = s => s.p * (65 + s.d * 20) * Math.PI / 180; // full situps: 65–85°
+
+  $("voice").checked = false; $("beep").checked = false; $("autoNext").checked = false;
+  const S = 0.42; // person size relative to the single-person pose
+  const PY = 0.62, SY = 0.55; // vertical placement for pushups and situps
+  const plank = i => place(pushup(0, 0.12), i, S, PY);
+  let now = performance.now();
+  const results = [];
+  window.__trace = []; window.__label = ""; window.__traceLane = Number(location.hash.match(/trace=(\d)/)?.[1] ?? -1); // #selftest&trace=2
+  const check = (name, expected, actual) => results.push({ name, expected: JSON.stringify(expected), actual: JSON.stringify(actual), pass: JSON.stringify(expected) === JSON.stringify(actual) });
+  const counts = id => state.people.slice(0, 3).map(p => p.counts[id]); // the test uses three people
+  if (check0) check(...check0);
+  const actives = () => state.people.slice(0, 3).map(p => p.active);
+  const add = (base, d) => base.map((c, i) => c + d[i]);
+  // Run frames where each person's pose comes from their own function of frame index; extra(f) adds a 4th pose.
+  const run = (frames, poseFor, extra = () => null) => {
+    for (let f = 0; f < frames; f++) {
+      now += 1000 / FPS;
+      handleFrame([0, 1, 2].map(i => poseFor(i, f)).concat([extra(f)]).filter(Boolean), now);
+    }
+  };
+  // A schedule of reps for one person: per frame { p: depth fraction 0..1, d: random depth 0..1, r: rep index, k, n }.
+  const schedule = (reps, minSec, maxSec, startDelay) => {
+    const out = Array(sec(startDelay)).fill({ p: 0, d: 0.5, r: -1 });
+    for (let r = 0; r < reps; r++) {
+      const n = sec(minSec + rand() * (maxSec - minSec)), d = rand();
+      for (let k = 0; k < n; k++) out.push({ p: (1 - Math.cos(2 * Math.PI * k / n)) / 2, d, r, k, n });
+      if (rand() < 0.2) for (let k = 0; k < sec(0.5); k++) out.push({ p: 0, d, r: -1 });
+    }
+    return out;
+  };
+  const pushFrame = (i, s) => toLm(place(pushup(s.p, 0.12 + s.d * 0.04), i, S, PY)); // full pushups: drop 0.12–0.16
+  const sitFrame = (i, s, cx, size = S) => toLm(place(situp(situpAngle(s)), i, size, SY, cx));
+  const len = plans => Math.max(...plans.map(p => p.length)) + sec(1);
+  const start = counts("pushups");
+
+  // 1. Three people get down from standing into a plank: no reps.
+  setAllActive("pushups");
+  run(sec(1), i => toLm(place(standing, i, S, PY)));
+  run(sec(2), (i, f) => toLm(place(mix(standing, pushup(0, 0.15), (f + 1) / sec(2)), i, S, PY)));
+  run(sec(1), i => toLm(place(pushup(0, 0.15), i, S, PY)));
+  check("Three people getting into plank add nothing", start, counts("pushups"));
+
+  window.__label = "2";
+  // 2. All three do pushups at once at different paces: 30, 24 and 36 reps. Depth (shoulder drop 7–16%) varies per rep.
+  let plans = [schedule(30, 0.8, 1.6, 0), schedule(24, 1.1, 2.0, 0.4), schedule(36, 0.6, 1.2, 0.2)];
+  run(len(plans), (i, f) => pushFrame(i, plans[i][f] || { p: 0, d: 0.5 }));
+  check("Pushups at the same time, different paces", add(start, [30, 24, 36]), counts("pushups"));
+
+  window.__label = "3";
+  // 3. The middle person stands up and walks around in their lane while the others hold a plank.
+  let b = counts("pushups");
+  run(sec(2), (i, f) => toLm(i === 1 ? place(mix(pushup(0, 0.12), standing, (f + 1) / sec(2)), i, S, PY) : plank(i)));
+  run(sec(2), i => toLm(i === 1 ? place(standing, i, S, PY) : plank(i)));
+  check("One person standing up adds nothing to anyone", b, counts("pushups"));
+
+  // 3b. Standing up in other ways: after a shallow rep that didn't count, after a knee dip, after a long hold.
+  setAllActive("pushups");
+  run(sec(1), i => toLm(plank(i)));
+  b = counts("pushups");
+  const standUp = (i, from) => run(sec(2), (k, f) => toLm(k === i ? place(mix(from, standing, (f + 1) / sec(2)), i, S, PY) : plank(k)));
+  const backDown = i => { run(sec(1), k => toLm(k === i ? place(standing, i, S, PY) : plank(k))); run(sec(2), (k, f) => toLm(k === i ? place(mix(standing, pushup(0, 0.12), (f + 1) / sec(2)), i, S, PY) : plank(k))); run(sec(1), k => toLm(plank(k))); };
+  run(sec(0.6), (k, f) => toLm(k === 0 ? place(pushup(Math.sin(Math.PI * f / sec(0.6)), 0.02), 0, S, PY) : plank(k))); // too shallow to count at any sensitivity
+  standUp(0, pushup(0, 0.12)); backDown(0);
+  const kneeDip = { ...pushup(0, 0.12), shoulder: [0.62, 1.01], hip: [1.05, 1.12], knee: [1.32, 1.2] }; // hips and knees drop
+  run(sec(0.5), (k, f) => toLm(k === 1 ? place(mix(pushup(0, 0.12), kneeDip, Math.sin(Math.PI * f / sec(0.5))), 1, S, PY) : plank(k)));
+  standUp(1, pushup(0, 0.12)); backDown(1);
+  run(sec(5), k => toLm(plank(k))); // long hold at the top: rest() forgets the rep depth
+  standUp(2, pushup(0, 0.12)); backDown(2);
+  check("Standing up after a shallow rep, a knee dip, or a long hold adds nothing", b, counts("pushups"));
+
+  window.__label = "4";
+  // 4. Only one person in frame, others out of view: only that person's count moves.
+  b = counts("pushups");
+  let solo = schedule(10, 0.9, 1.4, 0);
+  run(solo.length + sec(1), (i, f) => i === 2 ? pushFrame(2, solo[f] || { p: 0, d: 0.5 }) : null);
+  check("Only the person in frame gets reps", add(b, [0, 0, 10]), counts("pushups"));
+
+  // 5. Tracking starts with someone lying at the bottom of a deep pushup. Every rep used to be counted then undone.
+  setAllActive("pushups");
+  b = counts("pushups");
+  const deep = 0.18;
+  run(sec(2), i => toLm(i === 1 ? place(pushup(1, deep), 1, S, PY) : plank(i)));
+  run(sec(1), (i, f) => toLm(i === 1 ? place(pushup(1 - (f + 1) / sec(1), deep), 1, S, PY) : plank(i)));
+  solo = schedule(15, 1.0, 1.4, 0.5);
+  run(solo.length + sec(1), (i, f) => i === 1 ? toLm(place(pushup((solo[f] || { p: 0 }).p, deep), 1, S, PY)) : toLm(plank(i)));
+  check("Starting at the bottom of a deep pushup: every rep counts", add(b, [0, 15, 0]), counts("pushups"));
+
+  window.__label = "5b";
+  // 5b. Same with a normal-depth pushup (between the minimum rep and the stand-up limit): no phantom rep.
+  setAllActive("pushups");
+  b = counts("pushups");
+  const mid = 0.15;
+  run(sec(2), i => toLm(i === 0 ? place(pushup(1, mid), 0, S, PY) : plank(i)));
+  run(sec(1), (i, f) => toLm(i === 0 ? place(pushup(1 - (f + 1) / sec(1), mid), 0, S, PY) : plank(i)));
+  solo = schedule(12, 1.0, 1.4, 0.5);
+  run(solo.length + sec(1), (i, f) => i === 0 ? toLm(place(pushup((solo[f] || { p: 0 }).p, mid), 0, S, PY)) : toLm(plank(i)));
+  check("Starting at the bottom of a normal pushup: no phantom rep", add(b, [12, 0, 0]), counts("pushups"));
+
+  window.__label = "6";
+  // 6. Pose drops out for 0.4 s at the bottom of reps 3 and 7.
+  b = counts("pushups");
+  solo = schedule(10, 1.0, 1.4, 0);
+  run(solo.length + sec(1), (i, f) => {
+    if (i !== 2) return toLm(plank(i));
+    const s = solo[f] || { p: 0, d: 0.5, r: -1 };
+    return (s.r === 2 || s.r === 6) && Math.abs(s.k - s.n / 2) < sec(0.2) ? null : pushFrame(2, s);
+  });
+  check("Pose dropout at the bottom of a rep", add(b, [0, 0, 10]), counts("pushups"));
+
+  // 7. Person 0 leaves the frame for 5 s between two blocks of 8 reps.
+  b = counts("pushups");
+  const blockA = schedule(8, 0.9, 1.3, 0), blockB = schedule(8, 0.9, 1.3, 0.5);
+  const leave = [...blockA, ...Array(sec(5)).fill(null), ...Array(sec(1)).fill({ p: 0, d: 0.5 }), ...blockB];
+  run(leave.length + sec(1), (i, f) => i !== 0 ? toLm(plank(i)) : f < leave.length && leave[f] === null ? null : pushFrame(0, leave[f] || { p: 0, d: 0.5 }));
+  check("Leaving the frame for 5 s mid-set", add(b, [16, 0, 0]), counts("pushups"));
+
+  // 8. Someone much closer to the camera walks across all three lanes while everyone holds a plank, then reps resume.
+  b = counts("pushups");
+  run(sec(1.2), i => toLm(plank(i)), f => toLm(place(standing, 0, S * 2.2, 0.55, (0.1 + 0.8 * f / sec(1.2)) * ar)));
+  check("A passer-by adds nothing to anyone", b, counts("pushups"));
+  plans = [schedule(5, 0.9, 1.3, 0), schedule(5, 0.9, 1.3, 0.2), schedule(5, 0.9, 1.3, 0.1)];
+  run(len(plans), (i, f) => pushFrame(i, plans[i][f] || { p: 0, d: 0.5 }));
+  check("Reps after the passer-by still count", add(b, [5, 5, 5]), counts("pushups"));
+
+  // 9. Per-person exercise: person 0 finishes pushups early and starts situps while the others keep doing pushups.
+  $("autoNext").checked = true;
+  setAllActive("pushups");
+  state.people[0].counts.pushups = 297;
+  b = { push: counts("pushups"), sit: counts("situps") };
+  const p0 = [
+    ...schedule(3, 0.9, 1.2, 0).map(s => place(pushup(s.p, 0.12), 0, S, PY)),
+    ...Array(sec(3)).fill(plank(0)),
+    ...Array.from({ length: sec(1) }, (_, k) => mix(plank(0), place(situp(0), 0, S, SY), (k + 1) / sec(1))),
+    ...Array(sec(1)).fill(place(situp(0), 0, S, SY)),
+    ...schedule(8, 1.0, 1.6, 0).map(s => place(situp(situpAngle(s)), 0, S, SY)),
+  ];
+  plans = [null, schedule(6, 0.8, 1.2, 0), schedule(6, 0.8, 1.2, 0)];
+  run(Math.max(p0.length, len(plans.slice(1))) + sec(1), (i, f) => i === 0 ? toLm(p0[f] || place(situp(0), 0, S, SY)) : pushFrame(i, plans[i][f] || { p: 0, d: 0.5 }));
+  check("Early finisher: pushups stop at 300, situps counted", [300, b.push[1] + 6, b.push[2] + 6, b.sit[0] + 8, b.sit[1], b.sit[2]], [...counts("pushups"), ...counts("situps")]);
+  check("Early finisher moves to situps alone", ["situps", "pushups", "pushups"], actives());
+
+  // 10. The automatic switch re-checks the count, starts from +1, and is cancelled by a manual switch.
+  const lying0 = place(situp(0), 0, S, SY);
+  const hold = () => run(sec(3), i => toLm(i === 0 ? lying0 : plank(i)));
+  state.people[2].counts.pushups = 299; adjust(2, 1); adjust(2, -1); hold();
+  check("No switch after +1 then −1", [299, "pushups"], [state.people[2].counts.pushups, state.people[2].active]);
+  adjust(2, 1); hold();
+  check("+1 to the target switches to situps", "situps", state.people[2].active);
+  state.people[1].counts.pushups = 299; adjust(1, 1); setAllActive("pushups"); hold();
+  check("A manual switch cancels the automatic one", "pushups", state.people[1].active);
+  const q = state.people[2];
+  q.active = "situps"; resetTracking(2); q.counts.pushups = 299; q.counts.situps = 99;
+  adjust(2, 1); adjust(2, -1); hold();
+  check("Situps first: no switch after +1 then −1", [99, "situps"], [q.counts.situps, q.active]);
+  adjust(2, 1); q.counts.situps = 99; hold(); // count lowered without −1: the switch re-checks it
+  check("Situps first: the switch re-checks the count", [99, "situps"], [q.counts.situps, q.active]);
+  q.counts.situps = 0; q.counts.pushups = 300;
+  $("autoNext").checked = false;
+
+  // 11. Typing into a count box while reps are being counted keeps those reps; blank or invalid entries change nothing.
+  setAllActive("pushups");
+  run(sec(1), i => toLm(plank(i)));
+  const inp = $("cnt-1-pushups");
+  inp.focus(); inp.onfocus();
+  const c0 = state.people[1].counts.pushups;
+  inp.value = String(c0 - 5);
+  solo = schedule(5, 0.9, 1.2, 0);
+  run(solo.length + sec(1), (i, f) => i === 1 ? pushFrame(1, solo[f] || { p: 0, d: 0.5 }) : toLm(plank(i)));
+  inp.dispatchEvent(new Event("change"));
+  check("Typed count keeps reps counted meanwhile", c0, state.people[1].counts.pushups);
+  inp.value = ""; inp.dispatchEvent(new Event("change"));
+  check("Clearing a count box changes nothing", [c0, String(c0)], [state.people[1].counts.pushups, inp.value]);
+  for (const bad of ["-5", "10000"]) { inp.value = bad; inp.dispatchEvent(new Event("change")); }
+  check("Out-of-range counts change nothing", c0, state.people[1].counts.pushups);
+  inp.blur();
+
+  // 12. Legs out of view: the lane says so and nothing is counted.
+  b = counts("pushups");
+  solo = schedule(5, 0.9, 1.2, 0);
+  run(solo.length + sec(1), (i, f) => i === 1 ? toLm(place(pushup((solo[f] || { p: 0 }).p, 0.14), 1, S, PY), 0.1) : toLm(plank(i)));
+  check("Hidden legs are named", ["unclear", "legs", "Can't see legs"], [tracks[1].phase, tracks[1].missing, $("phase-1").textContent]);
+  check("Hidden legs add nothing", b, counts("pushups"));
+
+  // 13. One person mode: only lane 0 exists.
+  b = counts("pushups");
+  state.peopleCount = 1; tracks = Array.from({ length: MAX_PEOPLE }, newTrack);
+  solo = schedule(10, 0.9, 1.3, 0.5);
+  run(solo.length + sec(1), (i, f) => i === 0 ? pushFrame(0, solo[f] || { p: 0, d: 0.5 }) : null);
+  check("One person mode", add(b, [10, 0, 0]), counts("pushups"));
+  state.peopleCount = 3; tracks = Array.from({ length: MAX_PEOPLE }, newTrack);
+
+  // 14. Situps with person 1 slightly bigger and their hips near the left lane line (their shoulders swing into lane 0).
+  setAllActive("situps");
+  b = counts("situps");
+  const nearLine = ar / 3 + 0.02 * ar;
+  plans = [schedule(12, 1.0, 1.6, 0), schedule(10, 1.1, 1.8, 0.3), null];
+  run(len(plans.slice(0, 2)), (i, f) => i === 2 ? null : sitFrame(i, plans[i][f] || { p: 0, d: 0.5 }, i === 1 ? nearLine : undefined, i === 1 ? S * 1.1 : S));
+  check("Situps near a lane line stay with the right person", add(b, [12, 10, 0]), counts("situps"));
+
+  // 15. Passer-by during situps.
+  b = counts("situps");
+  const lie = i => sitFrame(i, { p: 0, d: 0.5 });
+  run(sec(1.2), i => lie(i), f => toLm(place(standing, 0, S * 2.2, 0.5, (0.9 - 0.8 * f / sec(1.2)) * ar)));
+  check("A passer-by during situps adds nothing", b, counts("situps"));
+
+  // 16. All three do situps at once: 20, 15 and 25 reps.
+  setAllActive("situps");
+  b = counts("situps");
+  plans = [schedule(20, 1.0, 2.2, 0), schedule(15, 1.4, 2.4, 0.3), schedule(25, 0.9, 1.6, 0.1)];
+  run(len(plans), (i, f) => sitFrame(i, plans[i][f] || { p: 0, d: 0.5 }));
+  check("Situps at the same time, different paces", add(b, [20, 15, 25]), counts("situps"));
+
+  // UI: a goal typed on one person's row changes it for everyone; − / + on a row change that row's movement.
+  const g = $("goal-0-situps"), s1 = state.people[1].counts.situps, p1 = state.people[1].counts.pushups;
+  g.value = "120"; g.dispatchEvent(new Event("change"));
+  $("plus-1-situps").click(); $("plus-1-situps").click(); $("minus-1-situps").click();
+  check("Typed goal and − / + on a row", [120, "120", s1 + 1, p1], [exById("situps").target, $("goal-2-situps").value, state.people[1].counts.situps, state.people[1].counts.pushups]);
+  g.value = "100"; g.dispatchEvent(new Event("change"));
+
+  // 16b. Reported on camera: half reps counted, and reps counted while holding plank. Person 0 does 8 full pushups,
+  // 6 half ones, then holds plank 6 s with two small sags; person 1 does 8 full situps and 6 that only get partway up.
+  window.__label = "16b";
+  setAllActive("pushups"); state.people[1].active = "situps"; resetTracking(1);
+  const hb = [counts("pushups")[0], counts("situps")[1]];
+  run(sec(1), i => i === 0 ? toLm(plank(0)) : i === 1 ? sitFrame(1, { p: 0, d: 0.5 }) : null);
+  const pFull = schedule(8, 1.0, 1.4, 0), pHalf = schedule(6, 0.9, 1.2, 0);
+  const sag = k => place(pushup(0.25 * Math.sin(Math.PI * k), 0.14), 0, S, PY); // shoulders sink ~1/4 rep and come back
+  const plankSet = [...pFull.map(s => place(pushup(s.p, 0.14), 0, S, PY)), ...pHalf.map(s => place(pushup(s.p * 0.45, 0.14), 0, S, PY)),
+    ...Array(sec(3)).fill(plank(0)), ...Array.from({ length: sec(0.8) }, (_, k) => sag(k / sec(0.8))), ...Array(sec(2)).fill(plank(0)),
+    ...Array.from({ length: sec(0.8) }, (_, k) => sag(k / sec(0.8))), ...Array(sec(1)).fill(plank(0))];
+  const sFull = schedule(8, 1.3, 1.8, 0), sHalf = schedule(6, 1.2, 1.6, 0);
+  const situpSet = [...sFull.map(s => ({ ...s, d: 0.8 })), ...sHalf.map(s => ({ ...s, p: s.p * 0.4, d: 0.8 }))];
+  run(Math.max(plankSet.length, situpSet.length) + sec(1), (i, f) => i === 0 ? toLm(plankSet[f] || plank(0)) : i === 1 ? sitFrame(1, situpSet[f] || { p: 0, d: 0.5 }) : null);
+  check("Half reps and holding plank add nothing", [hb[0] + 8, hb[1] + 8], [counts("pushups")[0], counts("situps")[1]]);
+
+  // 17. Other movements, one per person at the same time: squats, jumping jacks, bicep curls.
+  window.__label = "17";
+  state.plan.forEach(x => { if (["squats", "jacks", "curls"].includes(x.id)) x.on = true; });
+  buildPlan();
+  ["squats", "jacks", "curls"].forEach((id, i) => { state.people[i].active = id; resetTracking(i); });
+  const mb = [counts("squats")[0], counts("jacks")[1], counts("curls")[2]];
+  run(sec(1), i => toLm(place(standing, i, S, PY)));
+  plans = [schedule(12, 1.2, 2.0, 0), schedule(15, 0.8, 1.2, 0.2), schedule(10, 1.4, 2.2, 0.1)];
+  const moveAt = [squat, jack, curl];
+  run(len(plans), (i, f) => toLm(place(moveAt[i]((plans[i][f] || { p: 0 }).p), i, S, PY)));
+  check("Squats, jumping jacks and curls at the same time", [mb[0] + 12, mb[1] + 15, mb[2] + 10], [counts("squats")[0], counts("jacks")[1], counts("curls")[2]]);
+
+  // 18. Lunges, overhead press, and curls one arm at a time (5 per arm).
+  window.__label = "18";
+  state.plan.forEach(x => { if (["lunges", "press"].includes(x.id)) x.on = true; });
+  buildPlan();
+  ["lunges", "press", "curls"].forEach((id, i) => { state.people[i].active = id; resetTracking(i); });
+  const nb = [counts("lunges")[0], counts("press")[1], counts("curls")[2]];
+  run(sec(1), i => toLm(place(standing, i, S, PY)));
+  plans = [schedule(12, 1.4, 2.2, 0), schedule(10, 1.2, 1.8, 0.2), schedule(10, 1.2, 1.8, 0.1)];
+  run(len(plans), (i, f) => {
+    const s = plans[i][f] || { p: 0, r: -1 };
+    return toLm(place(i === 0 ? lunge(s.p) : i === 1 ? press(s.p) : altCurl(s), i, S, PY));
+  });
+  check("Lunges, overhead press, and alternating curls", [nb[0] + 12, nb[1] + 10, nb[2] + 10], [counts("lunges")[0], counts("press")[1], counts("curls")[2]]);
+
+  // 19. Side-on to the camera, the far arm is partly hidden (low visibility): alternating curls must still count each
+  // arm, and a one-arm press with the far arm must count.
+  window.__label = "19";
+  ["curls", "press", "curls"].forEach((id, i) => { state.people[i].active = id; resetTracking(i); });
+  const ab = [counts("curls")[0], counts("press")[1], counts("curls")[2]];
+  run(sec(1), i => toLm(place(standing, i, S, PY)));
+  const farPress = p => ({ ...standing, elbow: [1.08, 0.38], wrist: [1.05, 0.28], elbowR: [1.1, 0.38 - 0.2 * p], wristR: [1.07, 0.28 - 0.25 * p], armRVis: 0.4 });
+  plans = [schedule(10, 1.2, 1.8, 0), schedule(10, 1.2, 1.8, 0.2), schedule(10, 1.2, 1.8, 0.1)];
+  run(len(plans), (i, f) => {
+    const s = plans[i][f] || { p: 0, r: -1 };
+    return toLm(place(i === 1 ? farPress(s.p) : { ...altCurl(s), armRVis: i === 0 ? 0.4 : 0.9 }, i, S, PY));
+  });
+  check("Far arm partly hidden: alternating curls and one-arm press", [ab[0] + 10, ab[1] + 10, ab[2] + 10], [counts("curls")[0], counts("press")[1], counts("curls")[2]]);
+
+  // 20. Teach a movement the counter doesn't know: person 1 does 5 lateral arm raises while it watches, then 10 more
+  // are counted as the new movement. The others stand still.
+  window.__label = "20";
+  const raise = p => ({ ...standing, elbow: [1.0 + 0.15 * p, 0.48 - 0.1 * p], wrist: [1.0 + 0.3 * p, 0.62 - 0.3 * p] }); // arms out to the side
+  run(sec(1), i => toLm(place(standing, i, S, PY)));
+  startTeach("Arm raises", 0, now);
+  solo = [...Array(sec(TEACH_READY_MS / 1000)).fill({ p: 0 }), ...schedule(5, 1.2, 1.6, 0.3)];
+  run(sec((TEACH_READY_MS + TEACH_MS) / 1000) + sec(0.5), (i, f) => toLm(place(i === 0 ? raise((solo[f] || { p: 0 }).p) : standing, i, S, PY)));
+  const taught = state.plan.find(x => MOVES[x.id]?.name === "Arm raises");
+  check("Teach: new movement added, ticked and active for the person who taught it", [true, true, true], [!!taught, !!taught?.on, state.people[0].active === taught?.id]);
+  if (taught) {
+    const tb = state.people[0].counts[taught.id];
+    solo = schedule(10, 1.2, 1.8, 0.5);
+    run(solo.length + sec(1), (i, f) => toLm(place(i === 0 ? raise((solo[f] || { p: 0 }).p) : standing, i, S, PY)));
+    check("Teach: the taught movement counts each rep", tb + 10, state.people[0].counts[taught.id]);
+  }
+  // A teach session with no clear movement adds nothing.
+  const before = state.plan.length;
+  startTeach("Standing still", 1, now);
+  run(sec((TEACH_READY_MS + TEACH_MS) / 1000) + sec(0.5), i => toLm(place(standing, i, S, PY)));
+  check("Teach: no clear movement adds nothing", before, state.plan.length);
+
+  // 21. A diagnostic recording (what the pose tracker saw, frame by frame) replays to exactly the counts made live.
+  window.__label = "21";
+  setAllActive("pushups");
+  run(sec(1), i => toLm(plank(i)));
+  const live0 = counts("pushups");
+  startDiag(now, 60000);
+  plans = [schedule(6, 0.9, 1.4, 0), schedule(5, 1.0, 1.6, 0.2), schedule(7, 0.8, 1.2, 0.1)];
+  run(len(plans), (i, f) => pushFrame(i, plans[i][f] || { p: 0, d: 0.5 }));
+  const rec = finishDiag();
+  const liveReps = counts("pushups").map((c, k) => c - live0[k]);
+  const json = JSON.parse(JSON.stringify(rec)); // as saved to and loaded from a file
+  const replayed = replayDiag(json);
+  check("A diagnostic recording replays to the same counts", [[6, 5, 7], liveReps], [liveReps, replayed.reps.slice(0, 3)]);
+  check("Replay leaves the workout untouched", live0.map((c, k) => c + liveReps[k]), counts("pushups"));
+
+  const ok = results.every(r => r.pass);
+  console.log("SELFTEST", JSON.stringify({ fps: FPS, sensitivity: SENS, results }));
+  const at = `${FPS} fps, sensitivity ${SENS}`;
+  setStatus(ok ? `Self-test passed at ${at}: every rep counted once, for the right person.` : `Self-test FAILED at ${at}`, ok ? "ok" : "err");
+  $("placeholderMsg").textContent = results.map(r => `${r.pass ? "PASS" : "FAIL"} · ${r.name}: expected ${r.expected}, counted ${r.actual}`).join(" | ");
+  updatePeople(); renderExSeg();
+}
+
+if (SELFTEST) runSelfTest();
+else if (landmarker && window.isSecureContext && navigator.mediaDevices) startCamera();
+</script>
+</body>
+</html>
