@@ -40,8 +40,10 @@ h1 { font: 700 32px/1 var(--display); letter-spacing: .02em; text-transform: upp
 #status.err { color: var(--down); }
 
 .stage { position: relative; background: #000; border-radius: 10px; overflow: hidden; aspect-ratio: 16 / 9; max-width: 100%; display: grid; place-items: center; }
-.stage:fullscreen { border-radius: 0; aspect-ratio: auto; width: 100%; height: 100%; }
-.stage:-webkit-full-screen { border-radius: 0; aspect-ratio: auto; width: 100%; height: 100%; }
+/* Portrait camera frames (an upright phone): size the stage to the frame. Must come before the big-screen rules. */
+.stage.portrait { aspect-ratio: var(--ar); max-height: 70vh; }
+.stage:fullscreen { border-radius: 0; aspect-ratio: auto; width: 100%; height: 100%; max-height: none; }
+.stage:-webkit-full-screen { border-radius: 0; aspect-ratio: auto; width: 100%; height: 100%; max-height: none; }
 /* Big screen where the browser has no element fullscreen (iPhone): fill the window instead. */
 .stage.big { position: fixed; inset: 0; z-index: 20; width: 100vw; height: 100vh; height: 100dvh; max-width: none; max-height: none; aspect-ratio: auto; border-radius: 0; }
 .stage .exit-big { display: none; position: absolute; top: max(8px, env(safe-area-inset-top, 0px)); right: max(8px, env(safe-area-inset-right, 0px)); z-index: 3; }
@@ -228,16 +230,17 @@ details summary { cursor: pointer; color: var(--muted); font-size: 14px; }
 <script>
   // If the app's script can't start at all (blocked network, content blocker, old browser), say so instead of
   // leaving "Loading…" on screen forever. The module sets window.__wwStarted as soon as it runs.
-  setTimeout(function () {
+  function wwFail(m) {
     if (window.__wwStarted) return;
-    var m = "Workout Watcher didn't start: a script couldn't load (network, content blocker or filter). Reload, or try another network or browser.";
     var s = document.getElementById("status"); if (s) { s.textContent = m; s.className = "err"; }
     var p = document.getElementById("placeholderMsg"); if (p) p.textContent = m;
-  }, 15000);
+  }
+  // An error thrown while the app sets itself up (before __wwStarted) is reported at once.
+  window.addEventListener("error", function () { wwFail("Workout Watcher couldn't start because of an error. Reload the page; if it keeps happening, try another browser."); });
+  setTimeout(function () { wwFail("Workout Watcher didn't start: a script couldn't load (network, content blocker or filter). Reload, or try another network or browser."); }, 15000);
 </script>
 <script type="module">
 import { createDetector, feed, rest } from "./detector.js?v=2"; // ?v=2 skips copies cached before serve.py turned caching off
-window.__wwStarted = true;
 
 const MP_URL = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
 const WASM = `${MP_URL}/wasm`;
@@ -1003,7 +1006,7 @@ function drawTrace(now) {
 }
 
 function draw() {
-  const W = canvas.width, H = canvas.height, n = state.peopleCount, big = !!fsEl() || $("stage").classList.contains("big");
+  const W = canvas.width, H = canvas.height, n = state.peopleCount, big = bigMode;
   ctx.save(); ctx.translate(W, 0); ctx.scale(-1, 1); ctx.drawImage(video, 0, 0, W, H); ctx.restore();
   const P = p => [(1 - p.x) * W, p.y * H];
   const font = (w, px) => `${w} ${Math.round(px)}px Barlow Condensed, sans-serif`;
@@ -1114,13 +1117,17 @@ async function createLandmarker(delegates = ["GPU", "CPU"]) {
 }
 
 let lastClock = 0, failures = 0, recovering = false, trackingDead = false;
-let detCount = 0, detWindowStart = 0, lowFpsSince = null, lowFpsWarned = false, lastFrameAt = 0;
+let detCount = 0, detWindowStart = 0, lowFpsSince = null, lastFrameAt = 0, lastLoopAt = 0;
 function loop() {
   if (!running) return;
   requestAnimationFrame(loop); // scheduled first, so an error below can never stop the loop
   if (video.readyState < 2) return;
   if (video.videoWidth && (video.videoWidth !== canvas.width || video.videoHeight !== canvas.height)) fitCanvas();
   const now = performance.now();
+  // The "camera stopped" timer only runs while frames are expected. A gap in this loop (page hidden, phone locked,
+  // tab throttled) or a paused video, a model rebuild or no model yet all restart it, with no per-path bookkeeping.
+  if (now - lastLoopAt > 1000 || video.paused || recovering || !landmarker) lastFrameAt = now;
+  lastLoopAt = now;
   if (!trackingDead && landmarker && !recovering && video.currentTime !== lastVideoTime) {
     lastFrameAt = now;
     lastVideoTime = video.currentTime;
@@ -1136,20 +1143,23 @@ function loop() {
     }
     try { drawTrace(now); } catch (e) { console.error(e); }
   }
-  if (landmarker && !recovering && now - detWindowStart >= 1000) {
+  if (!trackingDead && landmarker && !recovering && now - detWindowStart >= 1000) {
     const fps = Math.round(detCount * 1000 / (now - detWindowStart || 1000));
     detCount = 0; detWindowStart = now;
     $("detfps").textContent = `Detection ${fps} fps · ${usedDelegate}`;
     if (fps < 15) {
       lowFpsSince ??= now;
-      if (!lowFpsWarned && now - lowFpsSince > 5000) {
-        lowFpsWarned = true;
-        setStatus("Tracking, but detection is slow (under 15 fps): shallow reps may be missed. Stop recording, close other apps, or raise Sensitivity.", "err");
+      if (!slowWarning && now - lowFpsSince > 5000) {
+        slowWarning = "Detection is slow (under 15 fps): shallow reps may be missed. Stop recording, close other apps, or raise Sensitivity.";
+        trackingStatus();
       }
-    } else lowFpsSince = null;
+    } else {
+      lowFpsSince = null;
+      if (slowWarning) { slowWarning = ""; trackingStatus(); }
+    }
   }
   // A camera that stops delivering frames without firing any event.
-  if (!document.hidden && !trackingDead && !recovering && landmarker && lastFrameAt && now - lastFrameAt > 3000) stopTracking("The camera stopped sending video. Reconnect it and reload the page.");
+  if (!document.hidden && !trackingDead && lastFrameAt && now - lastFrameAt > 3000) stopTracking("The camera stopped sending video. Reconnect it and reload the page.");
   try { draw(); } catch (e) { console.error(e); }
   if (now - lastClock > 500) { lastClock = now; updateClock(); }
 }
@@ -1163,12 +1173,12 @@ async function recover() {
     landmarker = null;
     landmarker = await createLandmarker(["CPU"]);
     lastVideoTime = -1; resetTracking(); failures = 0;
-    setStatus("Tracking (restarted on CPU)", "ok"); say("Tracking restarted");
+    recoveredOnCpu = true; trackingStatus(); say("Tracking restarted");
   } catch (e) {
     stopTracking(`Tracking stopped: ${e.message ?? e}. Reload the page.`);
   } finally {
     recovering = false;
-    detCount = 0; detWindowStart = lastFrameAt = performance.now(); lowFpsSince = null; lowFpsWarned = false;
+    detCount = 0; detWindowStart = lastFrameAt = performance.now(); lowFpsSince = null;
   }
 }
 // Counting can't continue (model or camera gone): say so on every lane, big enough to see from the floor.
@@ -1194,10 +1204,20 @@ async function lockScreen() {
     wakeWarning = "The screen may go to sleep: set auto-lock / screen timeout to Never while you work out.";
   }
 }
-// "Tracking", plus the screen-sleep warning when there is one (other messages must not hide it).
-function trackingStatus(extra = "") {
-  const msg = ["Tracking.", extra, wakeWarning].filter(Boolean).join(" ");
-  setStatus(msg === "Tracking." ? "Tracking" : msg, extra || wakeWarning ? "err" : "ok");
+// The tracking status line. Every note that still applies is shown together, so no message hides another.
+let recoveredOnCpu = false, slowWarning = "", soundBlocked = false;
+function trackingStatus() {
+  const notes = [];
+  if (!$("soundGate").hidden) notes.push("Sound is off until you tap or click the page once.");
+  else if (soundBlocked && ($("beep").checked || $("voice").checked)) notes.push("This browser is blocking sound.");
+  if (slowWarning) notes.push(slowWarning);
+  if (wakeWarning) notes.push(wakeWarning);
+  const head = recoveredOnCpu ? "Tracking (restarted on CPU)" : "Tracking";
+  setStatus(notes.length ? `${head}. ${notes.join(" ")}` : head, notes.length ? "err" : "ok");
+}
+// Ask for the screen wake lock again (browsers drop it when the page is hidden, some need a tap first).
+function relock() {
+  if (running && !wakeLock) lockScreen().then(() => { if (running && !trackingDead) trackingStatus(); });
 }
 // Phones pause the camera while the page is in the background (screen locked, another app). When it comes back,
 // give the camera a fresh few seconds to resume before deciding it has stopped, and ask for the wake lock again.
@@ -1205,11 +1225,10 @@ document.addEventListener("visibilitychange", () => {
   if (!running) return;
   if (document.visibilityState === "visible") {
     if (!trackingDead) {
-      const t = performance.now();
-      lastFrameAt = t; detWindowStart = t; detCount = 0; lowFpsSince = null; lowFpsWarned = false;
+      detWindowStart = performance.now(); detCount = 0; lowFpsSince = null; // the background time isn't slow detection
       video.play().catch(() => {});
     }
-    if (!wakeLock) lockScreen().then(() => { if (running && !trackingDead) trackingStatus(); });
+    relock();
   } else say("Workout Watcher is in the background. Counting paused.");
 });
 
@@ -1232,34 +1251,45 @@ async function startCamera() {
     setStatus(msg, "err"); $("placeholderMsg").textContent = msg; $("camRetry").hidden = false;
     return;
   }
-  video.srcObject = stream;
+  try {
+    video.srcObject = stream;
+    await video.play();
+  } catch (e) {
+    console.warn("video", e.name, e.message);
+    stream.getTracks().forEach(t => t.stop()); stream = null; video.srcObject = null; // so Try again starts clean
+    const msg = "Couldn't start the camera picture. Press Try again.";
+    setStatus(msg, "err"); $("placeholderMsg").textContent = msg; $("camRetry").hidden = false;
+    return;
+  }
   const track = stream.getVideoTracks()[0];
   track?.addEventListener("ended", () => { if (running) stopTracking("The camera disconnected. Reconnect it and reload the page."); });
-  await video.play();
   fitCanvas();
   $("placeholder").hidden = true;
   $("pause").disabled = false; $("rec").disabled = false;
   startedAt = Date.now(); running = true;
   await lockScreen();
   // Browsers block sound until the page is tapped or clicked once; say so on screen, since nobody on the floor will notice.
-  if (!navigator.userActivation?.hasBeenActive) { $("soundGate").hidden = false; trackingStatus("Sound is off until you tap or click the page once."); }
-  else trackingStatus();
+  if (!navigator.userActivation?.hasBeenActive) $("soundGate").hidden = false;
+  trackingStatus();
   requestAnimationFrame(loop);
 }
 
 // The canvas matches the camera frame. Phones switch between portrait and landscape frames when rotated; body sizes
 // measured at the old shape are then wrong, so tracking starts fresh.
-function fitCanvas() {
-  const w = video.videoWidth || 1280, h = video.videoHeight || 720;
+function fitCanvas(w = video.videoWidth || 1280, h = video.videoHeight || 720) {
   if (canvas.width !== w || canvas.height !== h) {
+    // A recording or a teach session can't mix frames of two shapes: save/stop them first.
+    endDiagOnChange("camera picture");
+    if (teach) { teach = null; setTeachStatus("Teaching cancelled: the camera picture changed (phone turned?). Press Teach it again."); }
     canvas.width = w; canvas.height = h;
     for (const t of tracks) { t.scale = null; t.repScale = null; t.bigSince = null; t.settling = false; t.settleRef = null; t.trace = []; }
     resetTracking();
   }
-  const portrait = h > w;
+  const portrait = h > w, stage = $("stage");
   $("orientHint").hidden = !portrait;
-  $("stage").style.aspectRatio = portrait ? `${w} / ${h}` : "";
-  $("stage").style.maxHeight = portrait ? "70vh" : "";
+  stage.classList.toggle("portrait", portrait);
+  if (portrait) stage.style.setProperty("--ar", `${w} / ${h}`); else stage.style.removeProperty("--ar");
+  if (!stage.getAttribute("style")) stage.removeAttribute("style");
 }
 
 // ---------- recording ----------
@@ -1301,24 +1331,35 @@ let speechPrimed = false;
 const unlockEvents = ["pointerup", "touchend", "click", "keydown"];
 const unlockAudio = () => {
   if (navigator.userActivation && !navigator.userActivation.isActive) return;
+  const gateWasUp = !$("soundGate").hidden;
+  $("soundGate").hidden = true; // the tap happened: the bar has done its job even if the browser keeps audio blocked
+  const settle = () => {
+    soundBlocked = audioCtx?.state !== "running";
+    if (!soundBlocked) {
+      unlockEvents.forEach(ev => document.removeEventListener(ev, unlockAudio, true));
+      if (gateWasUp) beep(660, 120);
+    }
+    if (running && !trackingDead) trackingStatus();
+    relock();
+  };
   try {
     audioCtx ??= new AudioContext();
     const resumed = audioCtx.resume();
     const b = audioCtx.createBufferSource(); // a silent sample unlocks audio on older iPhones
     b.buffer = audioCtx.createBuffer(1, 1, 22050); b.connect(audioCtx.destination); b.start(0);
     if (!speechPrimed && $("voice").checked) { speechPrimed = true; say("Sound on"); } // iOS speech must start in a gesture
-    resumed.then(() => {
-      if (audioCtx.state !== "running") return;
-      unlockEvents.forEach(ev => document.removeEventListener(ev, unlockAudio, true));
-      if (!$("soundGate").hidden) { $("soundGate").hidden = true; if (running && !trackingDead) trackingStatus(); beep(660, 120); }
-      if (running && !wakeLock && "wakeLock" in navigator) lockScreen().then(() => { if (running && !trackingDead) trackingStatus(); });
-    }).catch(() => {});
-  } catch {}
+    // Some browsers never settle resume() while audio is blocked: don't wait on it forever.
+    Promise.race([resumed, new Promise(r => setTimeout(r, 1500))]).then(settle, settle);
+  } catch { settle(); }
 };
 unlockEvents.forEach(ev => document.addEventListener(ev, unlockAudio, true));
 // Big screen: real fullscreen where the browser allows it on an element, otherwise fill the window (iPhone).
 const fsEl = () => document.fullscreenElement || document.webkitFullscreenElement;
-const setPseudoBig = on => { $("stage").classList.toggle("big", on); document.body.classList.toggle("no-scroll", on); };
+let bigMode = false; // read by draw() every frame; updated only when big screen changes
+const updateBig = () => { bigMode = !!fsEl() || $("stage").classList.contains("big"); };
+const setPseudoBig = on => { $("stage").classList.toggle("big", on); document.body.classList.toggle("no-scroll", on); updateBig(); };
+document.addEventListener("fullscreenchange", updateBig);
+document.addEventListener("webkitfullscreenchange", updateBig);
 const toggleBig = () => {
   const stage = $("stage");
   if (stage.classList.contains("big")) return setPseudoBig(false);
@@ -1332,7 +1373,8 @@ $("exitBig").onclick = e => { e.stopPropagation(); setPseudoBig(false); };
 if (touchDevice) $("big").textContent = "Big screen";
 $("camRetry").onclick = () => { $("camRetry").hidden = true; startCamera(); };
 // Typing #replay or #selftest after the address only changes the hash; reload so the page starts in that mode.
-addEventListener("hashchange", () => { if (/^#(replay|selftest)/.test(location.hash) !== (REPLAY || SELFTEST)) location.reload(); });
+const START_HASH = location.hash, specialHash = h => /^#(replay|selftest)/.test(h);
+addEventListener("hashchange", () => { if (specialHash(location.hash) || specialHash(START_HASH)) location.reload(); });
 document.addEventListener("keydown", e => {
   if (e.key === "Escape" && $("stage").classList.contains("big")) { setPseudoBig(false); return; }
   const typing = e.target.isContentEditable || e.target.tagName === "TEXTAREA" || (e.target.tagName === "INPUT" && /^(text|number|search)$/.test(e.target.type));
@@ -1408,6 +1450,7 @@ if (REPLAY) {
   };
 }
 
+window.__wwStarted = true; // setup finished: the startup watchdog stands down
 if (!SELFTEST && !REPLAY && (!window.isSecureContext || !navigator.mediaDevices)) {
   setStatus("This browser can't use the camera here. Open the page over https (or http://localhost) in Chrome, Safari, Edge or Firefox.", "err");
   $("placeholderMsg").textContent = "This browser can't use the camera here. Open the link in Chrome, Safari, Edge or Firefox.";
@@ -1828,6 +1871,36 @@ function runSelfTest() {
   const teachBlocked = (() => { const before = teach; $("teachName").value = "x"; running = true; $("teachBtn").click(); running = false; const blocked = teach === before; teach = null; return blocked; })();
   setAllActive("pushups");
   check("Teaching waits for a recording; a setup change ends the recording", [true, null], [teachBlocked, diag]);
+
+  // 23. Code-review findings.
+  window.__label = "23";
+  // (a) Big screen fills the window even after a portrait camera frame (an upright phone) sized the stage.
+  const stg = $("stage");
+  fitCanvas(1080, 1920);
+  const portraitMax = getComputedStyle(stg).maxHeight;
+  setPseudoBig(true);
+  const bigMax = getComputedStyle(stg).maxHeight, bigRatio = getComputedStyle(stg).aspectRatio;
+  setPseudoBig(false);
+  fitCanvas(1280, 720);
+  check("Big screen ignores the portrait size cap", [true, "none", "auto", ""], [portraitMax !== "none", bigMax, bigRatio, stg.getAttribute("style") || ""]);
+  // (b) A camera-shape change (phone turned) saves and ends a diagnostic recording, and cancels teaching.
+  startDiag(now, 60000);
+  run(sec(0.5), i => toLm(plank(i)));
+  fitCanvas(720, 1280);
+  const diagEnded = diag === null, diagMsg = $("diagStatus").textContent;
+  diag = null;
+  startTeach("Rotate test", 1, now);
+  fitCanvas(1280, 720);
+  const teachEnded = teach === null, teachMsg = $("teachStatus").textContent;
+  teach = null;
+  check("Turning the phone saves and ends a recording, and cancels teaching", [true, true, true, true],
+    [diagEnded, diagMsg.includes("stopped early"), teachEnded, teachMsg.includes("cancelled")]);
+  // (c) One status line keeps every note that applies: sound off, CPU restart, slow detection.
+  $("soundGate").hidden = false; recoveredOnCpu = true; slowWarning = "Detection is slow.";
+  trackingStatus();
+  const st = $("status").textContent;
+  $("soundGate").hidden = true; recoveredOnCpu = false; slowWarning = "";
+  check("Status keeps the sound, CPU and speed notes together", [true, true, true], [st.includes("Sound is off"), st.includes("restarted on CPU"), st.includes("Detection is slow")]);
 
   const ok = results.every(r => r.pass);
   console.log("SELFTEST", JSON.stringify({ fps: FPS, sensitivity: SENS, results }));
